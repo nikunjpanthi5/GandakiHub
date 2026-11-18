@@ -1,0 +1,1643 @@
+# MASTER DEVELOPMENT PROMPT — GANDAKIHUB
+## A University Community, Academic Resource Sharing & Student Networking Platform
+
+Act as a senior full-stack software engineer, product architect, UI/UX designer, database engineer, and application security specialist.
+
+Build a complete, production-quality, responsive web application named **GandakiHub**.
+
+GandakiHub is an independent student-developed digital community platform designed initially for Gandaki University, Nepal. It should bring students, teachers, prospective students, and alumni together in one organized digital environment.
+
+This must be a genuinely functional web application, not a static template, UI mockup, or superficial AI-generated dashboard.
+
+Every important button, search field, form, filter, navigation item, and user interaction must work.
+
+---
+
+# 1. PRODUCT IDENTITY AND VISION
+
+**Application name:** GandakiHub
+
+**Tagline:** Your University. Your Community. Your Knowledge.
+
+**Primary objectives:**
+- Create a central community for university students.
+- Organize academic resources by program, semester, subject, and resource type.
+- Allow students to share notes, projects, and past examination questions.
+- Provide university-wide discussions and specialized communities.
+- Enable student networking through private connection requests.
+- Provide anonymous confessions and structured complaint channels.
+- Encourage collaboration, ideas, and student opportunities.
+- Provide a searchable repository of university knowledge.
+
+Initially support approximately 500 registered users, with an architecture that can be expanded later.
+
+**Important:** GandakiHub is an independent platform. Do not claim that it is officially owned, operated, approved, or endorsed by Gandaki University unless formal authorization is obtained.
+
+Include a discreet disclaimer in the footer.
+
+---
+
+# 2. TECHNOLOGY STACK — ZERO-BUDGET FIRST RELEASE
+
+Choose technologies that can be developed, deployed, and demonstrated using free tiers.
+
+### Frontend
+- Next.js with App Router.
+- React.
+- TypeScript with strict mode.
+- Tailwind CSS.
+- shadcn/ui.
+- Lucide icons.
+- Framer Motion for subtle animations only.
+- React Hook Form.
+- Zod validation.
+- TanStack Query where appropriate.
+
+### Backend
+- Next.js server actions and route handlers.
+- Supabase PostgreSQL.
+- Supabase Authentication.
+- Supabase Row Level Security (RLS).
+- Supabase Storage.
+- Database functions and triggers where appropriate.
+
+### Other services
+- Vercel Hobby for eligible personal-project hosting.
+- Resend for verification emails within free limits.
+- Cloudflare for DNS and available free security services.
+- GitHub for source control.
+
+Avoid paid services and external APIs unless absolutely necessary.
+
+Do not introduce a paid AI moderation API, paid search API, paid email API, or paid messaging server as a mandatory dependency.
+
+### Chat
+Private encrypted messaging must be marked:
+
+**Currently in Development**
+
+Do not build a fake encrypted messaging system.
+
+Prepare the architecture for future Matrix-based or another properly implemented end-to-end encrypted messaging integration.
+
+Do not store plaintext messages in Supabase or claim E2EE before it has been implemented and independently tested.
+
+---
+
+# 3. DESIGN AND USER EXPERIENCE
+
+The platform must look like a professionally designed university community website created by an experienced product designer.
+
+It must not look like generic AI-generated software.
+
+### Design inspiration
+Take inspiration from:
+- Reddit's community organization.
+- Modern university portals.
+- GitHub's structured information presentation.
+- Modern discussion platforms.
+- Professional academic resource repositories.
+
+Do not copy Reddit's branding, logos, or exact interface.
+
+### Visual identity
+Create an original visual identity for GandakiHub.
+
+Use:
+- A restrained university-inspired color palette.
+- Professional typography.
+- White or soft neutral surfaces.
+- Subtle borders and shadows.
+- Clear spacing and alignment.
+- Consistent icons.
+- Carefully designed cards.
+- Professional empty states.
+- Clear visual hierarchy.
+
+Avoid:
+- Excessive gradients.
+- Huge rounded cards everywhere.
+- Excessive animations.
+- Unnecessary dashboard statistics.
+- Random decorative graphics.
+- Generic AI-generated layouts.
+- Excessive glassmorphism.
+- Overly colorful interfaces.
+
+### Responsive layout
+
+Desktop:
+- Left sidebar: navigation and communities.
+- Center: main feed, search results, or selected community.
+- Right sidebar: trending communities, trending searches, announcements, and useful information.
+
+Mobile:
+- Single-column layout.
+- Collapsible navigation.
+- Bottom navigation bar.
+- Responsive cards and forms.
+- Easy-to-use search.
+- No horizontal overflow.
+
+Include light and dark themes.
+
+Provide accessible contrast, keyboard navigation, meaningful loading states, and clear error messages.
+
+---
+
+# 4. REGISTRATION AND USER AUTHENTICATION
+
+Registration must support two categories.
+
+### A. University members
+
+Students and teachers must register using their university email address:
+
+`@gandakiuniversity.edu.np`
+
+Implement:
+- Email verification using OTP.
+- Six-digit verification code.
+- Resend cooldown.
+- Rate limiting.
+- Password security.
+- Password reset.
+- Session management.
+- Email verification status.
+- Duplicate-account protection.
+
+Do not treat merely entering a university email address as proof of verification. Validate the address, verify ownership, and apply appropriate role assignment.
+
+### B. External users
+
+Allow external users to register using regular email addresses.
+
+They must select a reason for joining:
+- Future student / prospective applicant.
+- Parent or guardian.
+- University visitor.
+- Researcher.
+- Alumni.
+- Other.
+
+If Other is selected, require a short explanation.
+
+External users must not automatically receive student permissions.
+
+### User roles
+
+Implement:
+1. Super Admin.
+2. Admin.
+3. Community Moderator.
+4. Verified Student.
+5. Verified Teacher.
+6. Future Student.
+7. Alumni.
+8. Visitor.
+
+Enforce permissions on the server and through Supabase RLS.
+
+Never rely on frontend-only role restrictions.
+
+---
+
+# 5. USER PROFILES
+
+Every registered user should have a profile.
+
+Profile fields:
+- Display name.
+- Username.
+- Profile picture.
+- Short biography.
+- University email verification status.
+- Program.
+- Current semester, if applicable.
+- Role.
+- Interests.
+- Date joined.
+
+Allow users to:
+- Edit their own profile.
+- Change their profile picture.
+- Update their biography.
+- Manage notification preferences.
+- Manage privacy settings.
+- View their own posts and uploads.
+- View their own accepted connections.
+- View their own activity.
+
+Do not expose private email addresses or private connection lists publicly.
+
+---
+
+# 6. ACADEMIC COMMUNITY STRUCTURE
+
+This is one of the most important features of GandakiHub.
+
+Create a hierarchical academic community system.
+
+## University programs
+
+Initially create:
+
+1. BIT
+2. BALLB
+3. BBA
+4. B.Pharm
+5. BSM
+
+Each program must contain eight semester communities:
+
+- First Semester
+- Second Semester
+- Third Semester
+- Fourth Semester
+- Fifth Semester
+- Sixth Semester
+- Seventh Semester
+- Eighth Semester
+
+The structure must be dynamic.
+
+Administrators must be able to add additional programs, semesters, subjects, categories, and subcategories without changing source code.
+
+## Subject-wise organization
+
+Inside every semester, create five demonstration subjects.
+
+For example:
+
+BIT → First Semester:
+
+- Subject 1
+- Subject 2
+- Subject 3
+- Subject 4
+- Subject 5
+
+Repeat this demonstration structure for every semester of every program.
+
+These are temporary placeholder names. Administrators must be able to rename them to actual subject names later.
+
+For example:
+
+BIT → First Semester → Subject 1
+
+An administrator can rename Subject 1 to:
+
+Data Science
+
+Students must see the updated name immediately.
+
+### Required hierarchy
+
+Program → Semester → Subject → Resource Category → Uploaded Resources
+
+Example:
+
+GandakiHub
+→ BIT
+→ First Semester
+→ Data Science
+→ Notes
+→ Uploaded PDF documents
+
+Another example:
+
+GandakiHub
+→ BIT
+→ First Semester
+→ Data Science
+→ Past Questions
+→ Uploaded PDF documents
+
+Another example:
+
+GandakiHub
+→ BIT
+→ First Semester
+→ Data Science
+→ Projects
+→ Uploaded PDF documents
+
+## Resource categories inside every subject
+
+Each subject must have:
+
+1. Notes
+2. Past Questions
+3. Projects
+4. Assignments
+5. Exam Preparation
+6. General Discussion
+7. Resources
+
+The first three categories—Notes, Past Questions, and Projects—must accept PDF uploads only.
+
+For consistency, support PDF-only uploads for all academic documents where appropriate, but do not unnecessarily restrict discussion posts or profile images.
+
+### Important upload organization
+
+Students must upload academic resources inside the appropriate subject and category.
+
+Never allow an academic document to be uploaded without a selected program, semester, subject, and category.
+
+The platform must automatically associate the upload with the selected hierarchy.
+
+---
+
+# 7. ADMINISTRATOR CONTROL OVER ACADEMIC STRUCTURE
+
+Administrators must have complete control over the academic hierarchy.
+
+Create an Academic Structure Management section in the admin dashboard.
+
+Administrators can:
+
+- Create a new academic program.
+- Rename an existing program.
+- Add or remove semesters where appropriate.
+- Create new subjects.
+- Rename subjects.
+- Reorder subjects.
+- Archive subjects.
+- Restore archived subjects.
+- Create resource categories.
+- Rename categories.
+- Create nested subtopics.
+- Reorder subtopics.
+- Add new academic folders.
+- Manage resource visibility.
+
+For example:
+
+Admin can navigate to:
+
+BIT → First Semester → Add Subject
+
+Then create:
+
+- Mathematics
+- Computer Fundamentals
+- Programming
+- English
+- Digital Logic
+
+Administrators can also add further folders under each subject if required.
+
+### Permission rules
+
+Students:
+- Can browse academic communities.
+- Can upload academic resources.
+- Can edit their own uploaded resources, subject to moderation.
+- Can delete their own resources subject to platform policy.
+- Can report incorrect resources.
+- Cannot create, rename, delete, or reorganize official academic programs, semesters, subjects, categories, or administrator-defined subtopics.
+
+Teachers:
+- Can participate in academic communities.
+- Can publish announcements if authorized.
+- Can upload resources if permitted.
+- Cannot change the global academic structure unless given administrative permission.
+
+Moderators:
+- Can moderate content within assigned communities.
+- Cannot change global academic structure unless explicitly authorized.
+
+Administrators:
+- Can manage the structure.
+
+Super Admin:
+- Has complete platform-level control.
+
+All structural changes must be recorded in audit logs.
+
+---
+
+# 8. ACADEMIC RESOURCE UPLOAD SYSTEM
+
+Create a professional document upload interface.
+
+### Required upload fields
+
+Every student uploading a document must provide:
+
+1. Document title.
+2. Document type/category.
+3. Program.
+4. Semester.
+5. Subject.
+6. Optional subtopic/folder.
+7. Academic year or examination year, where applicable.
+8. Short description.
+9. PDF file.
+
+Examples of document titles:
+
+- Data Science — Unit 1 Notes.
+- Data Science — 2025 Final Examination.
+- Database Management — Normalization Project.
+- Mathematics — Important Questions.
+
+Do not automatically name every document using the subject name. Students must enter a meaningful document title.
+
+Display the uploader's public display name, upload date, subject, semester, and document type.
+
+### PDF-only enforcement
+
+For Notes, Projects, and Past Questions:
+
+- Accept PDF files only.
+- Validate file extension.
+- Validate MIME type.
+- Validate the actual file signature and PDF structure.
+- Reject renamed Word documents.
+- Reject DOC, DOCX, PPT, PPTX, ZIP, RAR, EXE, image, and other formats.
+- Enforce a configurable maximum upload size, initially 10 MB.
+- Store files in private Supabase Storage buckets.
+- Generate authorized download or preview URLs.
+- Do not expose private storage paths publicly.
+- Prevent unauthorized downloads.
+- Sanitize file names.
+- Use malware scanning where a suitable free solution is available.
+- Detect likely duplicate uploads using file hashes.
+
+Never trust frontend validation alone.
+
+### Resource review workflow
+
+When a student uploads a document:
+
+1. Validate the submission.
+2. Store it with pending status.
+3. Send it to the appropriate moderator or admin review queue.
+4. Review the document.
+5. Approve, reject, or request changes.
+6. Publish approved documents.
+
+Students must be able to edit their own submitted documents.
+
+If an approved document is edited, create a new pending revision or otherwise require review before publishing the updated version.
+
+The previously approved version should remain available until the new revision is approved, unless the content is removed for safety or legal reasons.
+
+Students must never be able to edit another student's upload.
+
+### Resource browsing
+
+Provide:
+- PDF preview.
+- Download.
+- Search.
+- Filters.
+- Sort by newest.
+- Sort by most downloaded.
+- Sort by most upvoted.
+- Report resource.
+- Bookmark resource.
+- View uploader profile.
+
+---
+
+# 9. GLOBAL SEARCH — EVERYTHING MUST BE SEARCHABLE
+
+Build a powerful universal search system.
+
+Search is a core feature, not an optional extra.
+
+The search system should be available in the main navigation and accessible throughout the platform.
+
+### Searchable content
+
+Users must be able to search:
+
+- Communities.
+- Academic programs.
+- Semesters.
+- Subjects.
+- Subject subfolders.
+- Notes.
+- Past questions.
+- Projects.
+- Assignments.
+- Academic resources.
+- Post titles.
+- Post descriptions.
+- Comments, where appropriate.
+- Discussion topics.
+- Usernames.
+- Public profile names.
+- Public announcements.
+- Events.
+- Polls.
+- Internship opportunities.
+- Job opportunities.
+- Study groups.
+- Ideas.
+- Public confessions.
+- Public complaint categories.
+- Tags and flairs.
+
+Respect visibility permissions. Search results must never expose private complaints, private messages, hidden confessions, private profiles, pending content, or content the searching user is not authorized to access.
+
+### Search interface
+
+Create:
+- Search suggestions.
+- Recent searches.
+- Search history controls.
+- Search autocomplete.
+- Search filters.
+- Search result categories.
+- Highlighted matching terms.
+- Relevant ranking.
+- Empty search states.
+- Clear filters.
+- Pagination or infinite scrolling.
+
+Allow filtering by:
+- Content type.
+- Program.
+- Semester.
+- Subject.
+- Category.
+- Academic year.
+- Upload date.
+- Community.
+- Popularity.
+- Relevance.
+
+### Search suggestions
+
+When a user types a query, show relevant suggestions such as:
+
+- Communities.
+- Subjects.
+- Documents.
+- Discussions.
+- Users.
+
+Example:
+
+Searching for "Data Science" should show:
+
+- Data Science subject.
+- Data Science Notes.
+- Data Science Past Questions.
+- Data Science Projects.
+- Posts discussing Data Science.
+- Communities where Data Science is discussed.
+
+### Search implementation
+
+Use PostgreSQL full-text search, indexed columns, and suitable trigram indexes.
+
+Use weighted relevance ranking.
+
+For PDF documents, search titles, descriptions, metadata, and extracted text only if a suitable free extraction process is implemented.
+
+Do not claim the contents of every PDF are searchable if text extraction has not been implemented.
+
+Build search as a reusable service so new content types automatically become searchable when registered.
+
+---
+
+# 10. TRENDING SEARCHES AND TRENDING COMMUNITIES
+
+Create a dedicated trending system.
+
+### Trending searches
+
+Show popular search terms based on actual platform search activity.
+
+Example:
+
+- Data Science
+- BIT Notes
+- Database Management
+- Final Examination
+- Internship
+
+Calculate trends using recent search frequency and growth, not random numbers.
+
+Provide:
+- Trending today.
+- Trending this week.
+- Popular searches.
+- Search popularity changes.
+
+Do not expose individual users' private search histories.
+
+Use aggregated search data.
+
+Allow users to clear their personal search history.
+
+### Trending communities
+
+Show communities gaining popularity based on genuine activity.
+
+Possible signals:
+- Recent posts.
+- Recent comments.
+- Active participants.
+- New members.
+- Upvotes.
+- Engagement growth.
+
+Display:
+- Community name.
+- Description.
+- Number of members.
+- Recent activity.
+- Join button.
+- Trending indicator.
+
+Provide:
+- Trending today.
+- Trending this week.
+- Most popular.
+- New communities.
+
+Do not manipulate numbers or fabricate activity.
+
+### Other trending sections
+
+Include:
+- Trending discussions.
+- Popular academic resources.
+- Most downloaded notes.
+- Most discussed subjects.
+- Popular projects.
+- Upcoming university events.
+- Most active study groups.
+
+Use actual database data.
+
+---
+
+# 11. COMMUNITY SYSTEM
+
+Create a flexible community system.
+
+### Academic communities
+
+Each program and semester should have a dedicated community structure.
+
+### Special communities
+
+Create the following:
+
+1. Confessions.
+2. Complaints & Suggestions.
+3. GetIdeas.
+4. Student Donations.
+5. Random.
+6. Future Students.
+7. Alumni.
+8. Internship & Opportunities.
+9. Events & Announcements.
+10. Lost & Found.
+11. Study Groups.
+
+### Community management
+
+Administrators can:
+- Create communities.
+- Rename communities.
+- Update descriptions.
+- Add icons or banners.
+- Set community rules.
+- Set visibility.
+- Assign moderators.
+- Archive communities.
+- Restore communities.
+- Add categories and subcategories.
+- Pin important posts.
+
+Community moderators can manage only the communities assigned to them.
+
+### Community visibility
+
+Support:
+- Public communities.
+- University-member-only communities.
+- Private communities with approval.
+
+---
+
+# 12. POSTS, DISCUSSIONS AND INTERACTIONS
+
+Implement:
+
+- Create posts.
+- Edit own posts.
+- Delete own posts.
+- Comments.
+- Nested replies.
+- Upvotes and downvotes.
+- Bookmarks.
+- Sharing links.
+- Tags.
+- Flairs.
+- Polls.
+- Post reporting.
+- Pinning by authorized moderators.
+- Sorting by newest.
+- Sorting by top.
+- Sorting by trending.
+
+Prevent duplicate votes.
+
+Use server-side authorization for all changes.
+
+Provide a polished feed with meaningful empty states.
+
+---
+
+# 13. CONNECTION REQUESTS AND PRIVATE CHAT PREPARATION
+
+Implement a student connection system.
+
+Users can:
+- Send connection requests.
+- Accept requests.
+- Reject requests.
+- Cancel outgoing requests.
+- Remove existing connections.
+- Block users.
+- Report users.
+
+Only accepted connections should be eligible to message one another in the future.
+
+Prevent:
+- Sending requests to oneself.
+- Duplicate pending requests.
+- Invalid connection states.
+- Unauthorized connection modifications.
+
+Connection lists and request details must be private.
+
+Users can view their own connections and requests.
+
+Other ordinary users must not be able to inspect another person's complete connection list.
+
+Administrators may access limited connection metadata for legitimate safety and moderation purposes, subject to audit logging. They must not gain access to private message content.
+
+### Chat interface
+
+Create a Messages navigation item.
+
+Display:
+
+**Private Messaging — Currently in Development**
+
+Use a polished coming-soon interface explaining that secure end-to-end encrypted messaging is being developed.
+
+For the first release:
+- Do not enable message sending.
+- Do not create fake conversations.
+- Do not store plaintext messages.
+- Do not claim that chat is encrypted.
+- Do not create an administrator backdoor.
+
+Prepare the system for a future Matrix or other audited E2EE implementation.
+
+When implemented:
+- Messages must be encrypted on the sender's device.
+- Only authorized recipient devices should decrypt them.
+- The server must not have plaintext access.
+- Encrypted attachments must be supported.
+- Device verification and key backup/recovery must be considered.
+- Message search should happen client-side after decryption.
+- Message metadata and content must be treated separately.
+
+---
+
+# 14. CONFESSIONS
+
+Create a dedicated anonymous confession community.
+
+Users can submit confessions anonymously.
+
+### Workflow
+
+1. User submits confession.
+2. Confession enters admin moderation.
+3. Authorized reviewer approves or rejects it.
+4. Approved confession is published without author identity.
+5. Users can react and comment subject to moderation rules.
+
+### Identity protection
+
+Only the Super Admin should be able to access the author-identity mapping through a protected, audited process.
+
+Regular admins and moderators must not be able to see confession authors.
+
+Use separate tables or a similarly isolated design for:
+- Public confession content.
+- Private author identity mapping.
+
+Do not expose author identity in API responses, frontend payloads, logs, or search indexes.
+
+Log every identity access.
+
+Be honest in the privacy policy: technical anonymity cannot be guaranteed against all infrastructure operators, compromised devices, legal requirements, or security breaches.
+
+---
+
+# 15. COMPLAINTS AND SUGGESTIONS
+
+Create a Complaints & Suggestions community.
+
+Allow:
+- Public complaints.
+- Private complaints.
+- Suggestions.
+- Feedback.
+- Status tracking.
+
+Private complaints must only be visible to authorized complaint handlers and the submitting user.
+
+Possible statuses:
+- Submitted.
+- Under Review.
+- In Progress.
+- Resolved.
+- Rejected.
+
+Allow admins to assign complaints to authorized handlers.
+
+Never expose private complaints in global search or trending sections.
+
+---
+
+# 16. GETIDEAS
+
+Create a dedicated innovation and idea-sharing community.
+
+Users can:
+- Submit ideas.
+- Describe problems.
+- Suggest improvements.
+- Request collaborators.
+- Upvote ideas.
+- Comment.
+- Follow an idea.
+- Update idea progress.
+
+Provide statuses:
+- New Idea.
+- Under Discussion.
+- Looking for Collaborators.
+- In Progress.
+- Completed.
+
+---
+
+# 17. STUDENT DONATIONS
+
+Create a Student Donations community.
+
+Students can submit requests for assistance.
+
+Moderators must review requests before publication.
+
+Allow:
+- Request descriptions.
+- Requested assistance category.
+- Optional contact method.
+- Status.
+- Verification notes.
+
+Do not expose sensitive medical, financial, identity, or bank documents publicly.
+
+Do not process or hold money in the initial version.
+
+---
+
+# 18. FUTURE STUDENTS
+
+Create a dedicated Future Students community.
+
+External users who register as prospective students can:
+- Ask admission questions.
+- Discuss programs.
+- Ask about university life.
+- Interact with verified student answers.
+- View public academic information.
+
+Future students may create posts and comments only within this community.
+
+They must not participate in current-student-only academic communities.
+
+Visitors who choose read-only access can view public content but cannot post, comment, vote, or upload.
+
+---
+
+# 19. INTERNSHIPS, OPPORTUNITIES AND EVENTS
+
+Create dedicated sections for:
+- Internships.
+- Jobs.
+- Scholarships.
+- Competitions.
+- Research opportunities.
+- Workshops.
+- University events.
+- Seminars.
+- Study groups.
+
+Allow authorized users to publish opportunities.
+
+Require review where appropriate.
+
+Include deadlines, eligibility, descriptions, and external application links.
+
+Make these listings searchable and filterable.
+
+---
+
+# 20. NOTIFICATIONS
+
+Implement a notification center.
+
+Notify users about:
+- Replies to their posts.
+- Comments.
+- Upvotes where appropriate.
+- Connection requests.
+- Accepted connections.
+- Community announcements.
+- Resource approval or rejection.
+- Moderation decisions.
+- Events.
+- Followed topics.
+
+Provide:
+- Unread count.
+- Mark as read.
+- Mark all as read.
+- Notification preferences.
+
+Do not send unnecessary emails for every interaction.
+
+---
+
+# 21. CONTENT MODERATION AND PROFANITY FILTERING
+
+Build a moderation system supporting English, Nepali Devanagari, and Romanized Nepali.
+
+Detect:
+- Abusive words.
+- Harassment.
+- Personal attacks.
+- Threats.
+- Spam.
+- Obfuscated profanity.
+- Mixed-language profanity.
+- Repeated unwanted messages or posts.
+
+Use:
+- Unicode normalization.
+- Case normalization.
+- Configurable word dictionaries.
+- Common spelling variations.
+- Context-aware rules where feasible.
+- User reporting.
+- Human moderation.
+
+Avoid automatically blocking legitimate academic discussion merely because it contains a flagged word.
+
+Allow administrators to:
+- Add profanity terms.
+- Edit terms.
+- Remove terms.
+- Configure severity.
+- Review flagged content.
+- Suspend users.
+- Warn users.
+- Restrict accounts.
+- Review appeals.
+
+Use graduated moderation actions.
+
+Maintain moderation audit logs.
+
+---
+
+# 22. ADMIN AND SUPER ADMIN DASHBOARD
+
+Build a complete administrative dashboard.
+
+### Overview
+Display genuine statistics:
+- Registered users.
+- Verified students.
+- Verified teachers.
+- Active users.
+- Total communities.
+- Total posts.
+- Total resources.
+- Pending uploads.
+- Pending confessions.
+- Pending complaints.
+- Reports.
+- Trending searches.
+
+### User management
+- Search users.
+- View account status.
+- Suspend accounts.
+- Restore accounts.
+- Change authorized roles.
+- Review reports.
+- Manage verification issues.
+
+### Community management
+- Create and edit communities.
+- Assign moderators.
+- Manage rules.
+- Manage categories.
+- Archive and restore communities.
+
+### Academic structure management
+- Add programs.
+- Add semesters.
+- Add subjects.
+- Rename subjects.
+- Add nested folders.
+- Rename subtopics.
+- Reorder the academic structure.
+- Manage categories.
+
+### Content moderation
+- Approve resources.
+- Reject resources.
+- Review revisions.
+- Moderate confessions.
+- Manage complaints.
+- Review reports.
+- Manage profanity filters.
+
+### Security and audit
+- Role changes.
+- Administrative actions.
+- Confession identity access.
+- Resource moderation decisions.
+- Account suspensions.
+- Academic structure changes.
+
+All important admin actions must be recorded.
+
+---
+
+# 23. DATABASE ARCHITECTURE
+
+Design a normalized PostgreSQL database.
+
+Suggested tables:
+
+- profiles
+- user_roles
+- external_registration_reasons
+- programs
+- semesters
+- subjects
+- academic_folders
+- resource_categories
+- communities
+- community_members
+- community_moderators
+- posts
+- comments
+- votes
+- bookmarks
+- tags
+- post_tags
+- polls
+- poll_options
+- poll_votes
+- resources
+- resource_revisions
+- resource_downloads
+- resource_reports
+- connection_requests
+- connections
+- user_blocks
+- confessions
+- confession_identity_vault
+- complaints
+- donation_requests
+- ideas
+- reports
+- moderation_queue
+- profanity_dictionary
+- notifications
+- search_events
+- search_suggestions
+- audit_logs
+- platform_settings
+- events
+- opportunities
+- study_groups
+
+Adapt the schema when necessary.
+
+### Academic structure relationships
+
+Programs must have multiple semesters.
+
+Semesters must have multiple subjects.
+
+Subjects must have multiple academic folders and resource categories.
+
+Resources must reference the correct academic hierarchy.
+
+Avoid hardcoding the academic structure in frontend components.
+
+### Search architecture
+
+Create searchable indexes for relevant content.
+
+Maintain aggregated search trends without exposing individual users' search histories.
+
+### Security
+
+Enable RLS on all sensitive tables.
+
+Use secure server-side operations for privileged actions.
+
+Never expose Supabase service-role credentials in frontend code.
+
+Do not rely on hidden buttons to enforce security.
+
+---
+
+# 24. FILE AND STORAGE SECURITY
+
+Use private storage buckets.
+
+Implement:
+- Secure upload authorization.
+- File size validation.
+- PDF validation.
+- Secure file retrieval.
+- Signed URLs where appropriate.
+- Ownership verification.
+- Resource revision history.
+- File hash checking.
+
+Never allow students to access arbitrary private storage objects.
+
+Do not put private complaint attachments or confession identity data in public storage.
+
+---
+
+# 25. MAIN WEBSITE NAVIGATION
+
+Create a clean navigation structure.
+
+### Main navigation
+
+- Home.
+- Explore.
+- Communities.
+- Academic Resources.
+- Trending.
+- Opportunities.
+- Events.
+- Connections.
+- Messages — Currently in Development.
+- Notifications.
+- Profile.
+
+### Sidebar
+
+Display:
+- Popular communities.
+- Recently visited communities.
+- Joined communities.
+- Academic programs.
+- Trending subjects.
+- Saved resources.
+
+### Right sidebar
+
+Display:
+- Trending searches.
+- Trending communities.
+- Trending discussions.
+- Popular resources.
+- University announcements.
+- Upcoming events.
+
+All navigation elements must be functional and permission-aware.
+
+---
+
+# 26. HOME PAGE
+
+Create a polished home feed.
+
+Include:
+- Welcome section.
+- Main search bar.
+- Create post button.
+- Trending searches.
+- Trending communities.
+- Popular discussions.
+- Recent posts.
+- Academic resource highlights.
+- Upcoming events.
+- Internship opportunities.
+
+Allow feed sorting:
+- For You.
+- Latest.
+- Trending.
+- Most Upvoted.
+
+For visitors, show only content they are authorized to view.
+
+Do not fabricate posts, user activity, statistics, or trending values.
+
+Use clearly identified demo content only when running the demonstration seed.
+
+---
+
+# 27. PERFORMANCE AND SCALABILITY
+
+Optimize for approximately 500 initial registered users.
+
+Implement:
+- Database indexes.
+- Pagination.
+- Lazy loading.
+- Image optimization.
+- Efficient queries.
+- Server-side validation.
+- Caching where appropriate.
+- Rate limiting.
+- Secure error handling.
+
+Do not load the entire database into the browser.
+
+Avoid unnecessary database requests.
+
+Keep the architecture ready for future migration to paid infrastructure if usage grows.
+
+---
+
+# 28. PRIVACY AND SECURITY REQUIREMENTS
+
+Implement:
+- Strong password handling through Supabase Auth.
+- Email verification.
+- Server-side authorization.
+- RLS.
+- Input validation.
+- Output escaping.
+- CSRF protection where applicable.
+- Rate limiting.
+- Secure session handling.
+- Audit logging.
+- Secure file storage.
+- Privacy-aware search.
+- Account blocking.
+- User reporting.
+
+Provide:
+- Privacy policy.
+- Terms of use.
+- Community guidelines.
+- Content moderation policy.
+
+Never expose:
+- Passwords.
+- Private emails.
+- Private connection lists.
+- Private complaints.
+- Confession identity mappings.
+- Private administrative secrets.
+- Future encrypted message contents.
+
+---
+
+# 29. FOLDER STRUCTURE
+
+Use a clean, maintainable project architecture.
+
+Suggested structure:
+
+app/
+  (auth)/
+  (main)/
+    home/
+    explore/
+    communities/
+    academic/
+    trending/
+    opportunities/
+    events/
+    connections/
+    messages/
+    notifications/
+    profile/
+  admin/
+  api/
+
+components/
+  layout/
+  navigation/
+  community/
+  academic/
+  resources/
+  search/
+  trending/
+  posts/
+  comments/
+  connections/
+  notifications/
+  admin/
+  ui/
+
+lib/
+  supabase/
+  auth/
+  permissions/
+  search/
+  moderation/
+  storage/
+  validation/
+  notifications/
+  analytics/
+
+hooks/
+types/
+schemas/
+services/
+supabase/
+  migrations/
+  seed.sql
+  functions/
+
+public/
+tests/
+
+Adapt the structure when necessary, but maintain clear separation of responsibilities.
+
+---
+
+# 30. DEMONSTRATION DATA
+
+Create seed data for the first release.
+
+### Programs
+
+BIT, BALLB, BBA, B.Pharm, BSM.
+
+### Semesters
+
+First Semester through Eighth Semester for each program.
+
+### Subjects
+
+Create exactly five initial placeholder subjects in each semester:
+
+- Subject 1
+- Subject 2
+- Subject 3
+- Subject 4
+- Subject 5
+
+Administrators will replace these names with actual subjects later.
+
+### Categories
+
+Create:
+
+- Notes
+- Past Questions
+- Projects
+- Assignments
+- Exam Preparation
+- General Discussion
+- Resources
+
+### Special communities
+
+Seed the special communities listed in this specification.
+
+Use realistic but clearly marked demo content.
+
+Do not fabricate real university announcements, real student identities, or real user statistics.
+
+---
+
+# 31. TESTING REQUIREMENTS
+
+Create meaningful automated tests.
+
+Test:
+
+### Authentication
+- University email verification.
+- External registration.
+- Invalid email.
+- Duplicate account.
+- Unauthorized role assignment.
+
+### Permissions
+- Student upload permissions.
+- Student inability to modify academic structure.
+- Moderator scope.
+- Admin scope.
+- Super Admin privileges.
+- Visitor read-only restrictions.
+- Future Student restrictions.
+
+### Academic system
+- Program creation.
+- Semester creation.
+- Subject creation.
+- Subject renaming.
+- Nested folder management.
+- Resource categorization.
+
+### Uploads
+- Valid PDF upload.
+- Invalid file rejection.
+- Oversized file rejection.
+- Unauthorized file access.
+- Resource revision review.
+
+### Search
+- Subject search.
+- Community search.
+- Resource search.
+- Post search.
+- Search filters.
+- Search permissions.
+- Trending calculations.
+
+### Connections
+- Request creation.
+- Acceptance.
+- Rejection.
+- Duplicate request prevention.
+- Blocking.
+- Private connection visibility.
+
+### Moderation
+- Confession anonymity.
+- Private complaint access.
+- Profanity filtering.
+- Reporting.
+- Admin audit logs.
+
+Use:
+- Vitest for unit tests.
+- Playwright for end-to-end tests.
+
+---
+
+# 32. DEVELOPMENT ROADMAP
+
+Build the project in the following phases.
+
+### Phase 1 — Foundation
+- Next.js setup.
+- Design system.
+- Supabase connection.
+- Database schema.
+- Authentication.
+- Roles and permissions.
+- Initial deployment.
+
+### Phase 2 — Academic structure
+- Programs.
+- Semesters.
+- Subjects.
+- Nested folders.
+- Resource categories.
+- Admin structure management.
+
+### Phase 3 — Academic resources
+- PDF uploads.
+- Metadata.
+- Review workflow.
+- Resource previews.
+- Downloads.
+- Resource search.
+
+### Phase 4 — Community system
+- Communities.
+- Posts.
+- Comments.
+- Voting.
+- Bookmarks.
+- Polls.
+- Profiles.
+
+### Phase 5 — Search and discovery
+- Universal search.
+- Autocomplete.
+- Search filters.
+- Trending searches.
+- Trending communities.
+- Trending resources.
+
+### Phase 6 — Special communities
+- Confessions.
+- Complaints.
+- GetIdeas.
+- Donations.
+- Future Students.
+- Opportunities.
+- Events.
+
+### Phase 7 — Connections and notifications
+- Connection requests.
+- Accept/reject.
+- Private connection lists.
+- Blocking.
+- Notifications.
+
+### Phase 8 — Moderation and administration
+- Admin dashboard.
+- Moderator dashboard.
+- Reports.
+- Profanity filters.
+- Audit logs.
+- Content review.
+
+### Phase 9 — Chat preparation
+- Messages page.
+- Currently in Development status.
+- Future Matrix/E2EE integration architecture.
+- No fake or plaintext messaging.
+
+### Phase 10 — Testing and launch
+- Security testing.
+- Responsive testing.
+- Performance testing.
+- Database optimization.
+- Deployment.
+- Demonstration.
+
+---
+
+# 33. IMPORTANT DEVELOPMENT RULES
+
+These rules are mandatory.
+
+1. Do not build only the frontend.
+2. Do not create buttons that do nothing.
+3. Do not use fake statistics.
+4. Do not hardcode academic structures into components.
+5. Do not allow students to modify administrator-defined academic categories.
+6. Do not allow non-owners to edit another user's resources.
+7. Require review for changes to approved academic resources.
+8. Enforce PDF-only uploads on the server.
+9. Make every relevant content type searchable.
+10. Ensure search respects permissions and privacy.
+11. Calculate trending sections from actual platform activity.
+12. Do not expose private user information.
+13. Do not expose administrator credentials.
+14. Do not claim E2EE while chat is under development.
+15. Do not require paid services for the first demonstration.
+16. Do not use unnecessary AI APIs.
+17. Do not generate a generic AI dashboard.
+18. Keep the design consistent and professionally polished.
+19. Build reusable components and maintainable code.
+20. Provide clear setup instructions and environment variable examples.
+21. Include database migrations and seed scripts.
+22. Ensure the application can be deployed from GitHub to Vercel.
+23. Do not silently replace working features with placeholders.
+24. Complete and test each phase before moving to the next.
+
+# 34. FINAL EXPECTATION
+
+Deliver a complete working GandakiHub application.
+
+The result should feel like a real university community product that students would genuinely want to use.
+
+It should be:
+- Professionally designed.
+- Fast.
+- Responsive.
+- Secure.
+- Easy to navigate.
+- Searchable.
+- Well organized.
+- Maintainable.
+- Suitable for a live demonstration.
+
+The initial release must have fully working authentication, academic communities, subject folders, PDF resource sharing, discussions, universal search, trending sections, connections, special communities, moderation, and administration.
+
+Private encrypted messaging must be clearly marked as currently in development until a genuine end-to-end encrypted implementation is deployed and tested.
+
+**Start by inspecting the project environment and creating an implementation plan. Then build the actual application phase by phase. Do not stop after generating a plan or a homepage. Continue until the required functionality is implemented, tested, and documented.**

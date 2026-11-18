@@ -1,0 +1,6 @@
+{
+  "name": "GandakiHub",
+  "description": "Independent university community, hierarchical academic resource sharing, and student networking platform for Gandaki University, Nepal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
