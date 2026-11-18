@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatRelativeDate, formatRoleLabel } from '../../lib/api.ts';
+import { api, formatRelativeDate, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type {
   ConnectionRequestItem,
   ConnectionSummary,
@@ -497,7 +497,7 @@ export function ProfileView({ username }: { username?: string }) {
           <div className="flex items-start gap-4">
             {profile.avatar_url ? (
               <img
-                src={profile.avatar_url}
+                src={resolveApiUrl(profile.avatar_url)}
                 alt={profile.display_name}
                 className="w-16 h-16 rounded-xl object-cover border border-slate-200 dark:border-slate-700"
                 referrerPolicy="no-referrer"

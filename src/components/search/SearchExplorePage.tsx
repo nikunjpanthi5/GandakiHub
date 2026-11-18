@@ -118,10 +118,15 @@ export function SearchExplorePage() {
 
   const typeTabs = [
     { id: 'all', label: 'All' },
+    { id: 'program', label: 'Programs' },
+    { id: 'semester', label: 'Semesters' },
     { id: 'subject', label: 'Subjects' },
+    { id: 'folder', label: 'Folders' },
     { id: 'resource', label: 'Documents' },
     { id: 'community', label: 'Communities' },
     { id: 'post', label: 'Discussions' },
+    { id: 'comment', label: 'Comments' },
+    { id: 'tag', label: 'Topics / Tags' },
     { id: 'user', label: 'People' },
     { id: 'opportunity', label: 'Opportunities' },
     { id: 'event', label: 'Events' },

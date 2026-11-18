@@ -51,16 +51,42 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
+export const API_BASE_URL = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+
+export function resolveApiUrl(path: string): string {
+  if (!path) return path;
+  if (/^https?:\/\//i.test(path) || path.startsWith('blob:') || path.startsWith('data:')) {
+    return path;
+  }
+  if (!API_BASE_URL) return path;
+  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(resolveApiUrl(url), init);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new ApiError(
+        'Unable to reach the GandakiHub API server. If the free-tier backend was sleeping, it may take 30–50 seconds to wake up — please retry.',
+        0,
+        null
+      );
+    }
+    throw err;
+  }
+}
+
 export const api = {
   async get<T>(url: string): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       credentials: 'include',
       headers: buildHeaders(),
     });
     return handleResponse<T>(res);
   },
   async post<T>(url: string, body?: unknown): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: 'POST',
       credentials: 'include',
       headers: buildHeaders({ 'Content-Type': 'application/json' }),
@@ -69,7 +95,7 @@ export const api = {
     return handleResponse<T>(res);
   },
   async patch<T>(url: string, body?: unknown): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: 'PATCH',
       credentials: 'include',
       headers: buildHeaders({ 'Content-Type': 'application/json' }),
@@ -78,7 +104,7 @@ export const api = {
     return handleResponse<T>(res);
   },
   async put<T>(url: string, body?: unknown): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: 'PUT',
       credentials: 'include',
       headers: buildHeaders({ 'Content-Type': 'application/json' }),
@@ -87,7 +113,7 @@ export const api = {
     return handleResponse<T>(res);
   },
   async delete<T>(url: string): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: 'DELETE',
       credentials: 'include',
       headers: buildHeaders(),
@@ -95,7 +121,7 @@ export const api = {
     return handleResponse<T>(res);
   },
   async upload<T>(url: string, formData: FormData, method: 'POST' | 'PUT' = 'POST'): Promise<T> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
       credentials: 'include',
       headers: buildHeaders(),
@@ -104,7 +130,7 @@ export const api = {
     return handleResponse<T>(res);
   },
   async fetchBlob(url: string): Promise<Blob> {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       credentials: 'include',
       headers: buildHeaders(),
     });

@@ -397,10 +397,15 @@ export interface TrendingSearch {
 
 export interface SearchResultItem {
   type:
+    | 'program'
+    | 'semester'
     | 'subject'
+    | 'folder'
     | 'resource'
     | 'community'
     | 'post'
+    | 'comment'
+    | 'tag'
     | 'user'
     | 'opportunity'
     | 'event'

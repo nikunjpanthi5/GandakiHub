@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatBytes, formatRoleLabel } from '../../lib/api.ts';
+import { api, formatBytes, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type { Community, UserRole } from '../../types/index.ts';
 
 type AdminTab = 'overview' | 'academic' | 'moderation' | 'users' | 'profanity' | 'audit';
@@ -46,16 +46,16 @@ export function AdminDashboard() {
   const { user, structure, refreshStructure, refreshCommunities, openAuthModal, notify } = useApp();
   const [tab, setTab] = useState<AdminTab>('overview');
   const [overview, setOverview] = useState<AdminOverviewData | null>(null);
-  const [usersList, setUsersList] = useState<Array<{ id: string; email: string; username: string; display_name: string; role: UserRole; account_status: string; university_email_verified: number; program_code: string | null }>>([]);
+  const [usersList, setUsersList] = useState<Array<{ id: string; email: string; username: string; display_name: string; role: UserRole; account_status: string; university_email_verified: boolean | number; program_code: string | null }>>([]);
   const [userSearch, setUserSearch] = useState('');
   const [profanityList, setProfanityList] = useState<Array<{ id: string; term: string; language: string; severity: string; context_exception_note: string | null }>>([]);
-  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; actor_name: string | null; actor_role: string | null; action: string; target_type: string; target_id: string; metadata_json: string; created_at: string }>>([]);
+  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; actor_name: string | null; actor_role: string | null; action: string; target_type: string; target_id: string; metadata?: Record<string, unknown> | string | null; metadata_json?: string | null; created_at: string }>>([]);
 
   // Academic Structure Management State
   const [fullStruct, setFullStruct] = useState(structure);
   const [adminCommunities, setAdminCommunities] = useState<Community[]>([]);
-  const [selectedProgId, setSelectedProgId] = useState('prog-bit');
-  const [selectedSemId, setSelectedSemId] = useState('prog-bit-sem-1');
+  const [selectedProgId, setSelectedProgId] = useState('');
+  const [selectedSemId, setSelectedSemId] = useState('');
   const [selectedSubjId, setSelectedSubjId] = useState('');
 
   // Create & Edit Academic Structure forms
@@ -105,6 +105,9 @@ export function AdminDashboard() {
   const [vaultReason, setVaultReason] = useState('');
   const [vaultResult, setVaultResult] = useState<{ username: string; display_name: string; email: string; role: string } | null>(null);
 
+  // Authorized PDF inspection modal
+  const [inspectPdfModal, setInspectPdfModal] = useState<{ title: string; blobUrl: string } | null>(null);
+
   const isStaff = user && ['super_admin', 'admin', 'community_moderator'].includes(user.role);
   const isAdmin = user && ['super_admin', 'admin'].includes(user.role);
   const isSuperAdmin = user?.role === 'super_admin';
@@ -147,6 +150,18 @@ export function AdminDashboard() {
     void loadAllAcademic();
     void loadProfanity();
   }, [loadOverview, loadAllAcademic, loadProfanity]);
+
+  useEffect(() => {
+    if (!selectedProgId && fullStruct.programs.length > 0) {
+      const firstProg = fullStruct.programs[0].id;
+      setSelectedProgId(firstProg);
+      const firstSem = fullStruct.semesters.find((s) => s.program_id === firstProg);
+      if (firstSem) setSelectedSemId(firstSem.id);
+    } else if (selectedProgId && !selectedSemId) {
+      const firstSem = fullStruct.semesters.find((s) => s.program_id === selectedProgId);
+      if (firstSem) setSelectedSemId(firstSem.id);
+    }
+  }, [fullStruct.programs, fullStruct.semesters, selectedProgId, selectedSemId]);
 
   useEffect(() => {
     if (tab === 'users') void loadUsers();
@@ -358,6 +373,21 @@ export function AdminDashboard() {
       notify('Identity vault access logged in security audit trail.', 'info');
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Lookup failed.', 'error');
+    }
+  }
+
+  async function handleInspectPendingPdf(resourceId: string, revisionId: string, title: string) {
+    try {
+      const blob = await api.fetchBlob(
+        `/api/academic/resources/${encodeURIComponent(resourceId)}/file?revisionId=${encodeURIComponent(revisionId)}`
+      );
+      const blobUrl = URL.createObjectURL(blob);
+      setInspectPdfModal((prev) => {
+        if (prev) URL.revokeObjectURL(prev.blobUrl);
+        return { title, blobUrl };
+      });
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to open PDF.', 'error');
     }
   }
 
@@ -869,20 +899,23 @@ export function AdminDashboard() {
                       <div className="text-slate-400">Uploaded by {r.uploader_name}</div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <a
-                        href={`/api/academic/resources/${r.id}/file?revisionId=${r.revision_id}`}
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => void handleInspectPendingPdf(r.id, r.revision_id, r.title)}
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs"
                       >
                         <Eye className="w-3.5 h-3.5" /> Inspect PDF
-                      </a>
+                      </button>
                       <button
                         type="button"
                         onClick={async () => {
-                          await api.post(`/api/academic/resources/${r.id}/review`, { decision: 'approved', revision_id: r.revision_id, review_notes: 'Approved after verification' });
-                          await loadOverview();
-                          notify('Resource approved and published.', 'success');
+                          try {
+                            await api.post(`/api/academic/resources/${r.id}/review`, { decision: 'approved', revision_id: r.revision_id, review_notes: 'Approved after verification' });
+                            await loadOverview();
+                            notify('Resource approved and published.', 'success');
+                          } catch (err) {
+                            notify(err instanceof Error ? err.message : 'Approval failed.', 'error');
+                          }
                         }}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-medium"
                       >
@@ -891,9 +924,13 @@ export function AdminDashboard() {
                       <button
                         type="button"
                         onClick={async () => {
-                          await api.post(`/api/academic/resources/${r.id}/review`, { decision: 'rejected', revision_id: r.revision_id, review_notes: 'Does not meet academic guidelines' });
-                          await loadOverview();
-                          notify('Resource rejected.', 'info');
+                          try {
+                            await api.post(`/api/academic/resources/${r.id}/review`, { decision: 'rejected', revision_id: r.revision_id, review_notes: 'Does not meet academic guidelines' });
+                            await loadOverview();
+                            notify('Resource rejected.', 'info');
+                          } catch (err) {
+                            notify(err instanceof Error ? err.message : 'Rejection failed.', 'error');
+                          }
                         }}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium"
                       >
@@ -919,7 +956,7 @@ export function AdminDashboard() {
                     {c.body && <p className="text-xs text-slate-600 dark:text-slate-300">{c.body}</p>}
                     {c.image_url && (
                       <img
-                        src={c.image_url}
+                        src={resolveApiUrl(c.image_url)}
                         alt={c.title || 'Pending confession attachment'}
                         className="max-h-56 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain"
                       />
@@ -1252,15 +1289,23 @@ export function AdminDashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
-                {auditLogs.map((l) => (
-                  <tr key={l.id}>
-                    <td className="py-2 pr-3 whitespace-nowrap">{new Date(l.created_at).toLocaleString()}</td>
-                    <td className="py-2 pr-3 font-sans">{l.actor_name || 'System'}</td>
-                    <td className="py-2 pr-3 font-semibold">{l.action}</td>
-                    <td className="py-2 pr-3">{l.target_type}:{l.target_id.slice(0, 12)}</td>
-                    <td className="py-2 text-slate-500 max-w-xs truncate">{l.metadata_json}</td>
-                  </tr>
-                ))}
+                {auditLogs.map((l) => {
+                  const metaText =
+                    typeof l.metadata === 'string'
+                      ? l.metadata
+                      : l.metadata && Object.keys(l.metadata).length > 0
+                        ? JSON.stringify(l.metadata)
+                        : l.metadata_json || '';
+                  return (
+                    <tr key={l.id}>
+                      <td className="py-2 pr-3 whitespace-nowrap">{new Date(l.created_at).toLocaleString()}</td>
+                      <td className="py-2 pr-3 font-sans">{l.actor_name || 'System'}</td>
+                      <td className="py-2 pr-3 font-semibold">{l.action}</td>
+                      <td className="py-2 pr-3">{l.target_type}:{l.target_id.slice(0, 12)}</td>
+                      <td className="py-2 text-slate-500 max-w-xs truncate">{metaText}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1300,6 +1345,32 @@ export function AdminDashboard() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {inspectPdfModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+          <div className="w-full max-w-5xl h-[86vh] rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">{inspectPdfModal.title}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  URL.revokeObjectURL(inspectPdfModal.blobUrl);
+                  setInspectPdfModal(null);
+                }}
+                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Close PDF preview"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <iframe
+              src={inspectPdfModal.blobUrl}
+              title={inspectPdfModal.title}
+              className="flex-1 w-full bg-slate-100 dark:bg-slate-950"
+            />
+          </div>
         </div>
       )}
     </div>

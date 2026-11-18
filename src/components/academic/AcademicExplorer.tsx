@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatBytes, formatRelativeDate, formatRoleLabel } from '../../lib/api.ts';
+import { api, formatBytes, formatRelativeDate, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type { AcademicResource, Post, ResourceRevision } from '../../types/index.ts';
 import { ImageAttachmentField } from '../common/ImageAttachmentField.tsx';
 
@@ -634,7 +634,7 @@ export function AcademicExplorer() {
                   )}
                   {post.image_url && (
                     <img
-                      src={post.image_url}
+                      src={resolveApiUrl(post.image_url)}
                       alt={post.title || 'Discussion attachment'}
                       className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
                     />

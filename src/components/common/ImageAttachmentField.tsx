@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ImagePlus, X } from 'lucide-react';
-import { api } from '../../lib/api.ts';
+import { api, resolveApiUrl } from '../../lib/api.ts';
 
 export function ImageAttachmentField({
   imageUrl,
@@ -54,7 +54,7 @@ export function ImageAttachmentField({
       {imageUrl && (
         <div className="relative inline-block rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-50 dark:bg-slate-950">
           <img
-            src={imageUrl}
+            src={resolveApiUrl(imageUrl)}
             alt="Uploaded attachment preview"
             className="max-h-52 w-auto object-contain"
           />

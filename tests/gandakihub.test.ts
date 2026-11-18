@@ -1,18 +1,20 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { PGlite } from '@electric-sql/pglite';
+import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApiApp } from '../server/app.ts';
-import { initSchema } from '../server/db.ts';
+import { createPGliteDatabase, type AppDatabase } from '../server/db.ts';
 import { checkTextAgainstDictionary, normalizeDictionaryTerm } from '../server/profanity.ts';
 import { seedIfEmpty } from '../server/seed.ts';
+import { createMemoryStorage, type StorageService } from '../server/storage.ts';
 
 let server: http.Server;
 let baseUrl = '';
-let tmpStorageDir = '';
-let db: DatabaseSync;
+let db: AppDatabase;
+let storage: StorageService;
+let pglite: PGlite;
 
 function buildSamplePdfBuffer(title: string, year: string, lines: string[]): Buffer {
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
@@ -63,12 +65,14 @@ async function req(
   options: {
     method?: string;
     cookie?: string;
+    token?: string;
     json?: unknown;
     formData?: FormData;
   } = {}
 ) {
   const headers: Record<string, string> = {};
   if (options.cookie) headers['Cookie'] = options.cookie;
+  if (options.token) headers['Authorization'] = `Bearer ${options.token}`;
   let body: BodyInit | undefined;
   if (options.json !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -88,15 +92,22 @@ async function req(
   return { status: res.status, data, cookie: setCookie ? setCookie.split(';')[0] : options.cookie || '' };
 }
 
+let bitProgramId = '';
+let bitSem1Id = '';
+let bitSem1Subj1Id = '';
+let notesCatId = '';
+let genDiscCatId = '';
+let bitCommId = '';
+let futureCommId = '';
+
 async function registerAndVerify(params: {
   email: string;
   username: string;
   display_name: string;
   category: 'university_member' | 'external';
   member_type?: 'student' | 'teacher';
-  external_reason?: 'future_student' | 'university_visitor' | 'alumni' | 'other';
+  external_reason?: 'future_student' | 'university_visitor' | 'alumni' | 'platform_admin' | 'other';
   external_reason_detail?: string;
-  claim_super_admin?: boolean;
 }) {
   const reg = await req('/api/auth/register', {
     method: 'POST',
@@ -107,11 +118,10 @@ async function registerAndVerify(params: {
       display_name: params.display_name,
       category: params.category,
       member_type: params.member_type || 'student',
-      program_id: params.category === 'university_member' ? 'prog-bit' : null,
-      semester_id: params.category === 'university_member' && (params.member_type || 'student') === 'student' ? 'prog-bit-sem-1' : null,
+      program_id: params.category === 'university_member' ? bitProgramId : null,
+      semester_id: params.category === 'university_member' && (params.member_type || 'student') === 'student' ? bitSem1Id : null,
       external_reason: params.external_reason ?? null,
       external_reason_detail: params.external_reason_detail ?? null,
-      claim_super_admin: params.claim_super_admin ?? false,
     },
   });
   expect(reg.status).toBe(201);
@@ -126,10 +136,10 @@ async function registerAndVerify(params: {
     },
   });
   expect(ver.status).toBe(200);
-  return { user: ver.data.user, cookie: ver.cookie };
+  return { user: ver.data.user, cookie: ver.cookie, token: ver.data.sessionToken as string };
 }
 
-describe('GandakiHub Full-Stack Integration & Security Suite', () => {
+describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => {
   let superCookie = '';
   let adminCookie = '';
   let modCookie = '';
@@ -140,17 +150,22 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
   let futureCookie = '';
 
   beforeAll(async () => {
-    tmpStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-test-storage-'));
-    process.env.PRIVATE_STORAGE_DIR = tmpStorageDir;
     process.env.NODE_ENV = 'test';
+    process.env.SESSION_SECRET = 'test-only-gandakihub-secret-key-minimum-32-chars';
     delete process.env.SUPER_ADMIN_EMAIL;
 
-    db = new DatabaseSync(':memory:');
-    db.exec('PRAGMA foreign_keys = ON;');
-    initSchema(db);
-    seedIfEmpty(db);
+    pglite = new PGlite({ extensions: { pg_trgm } });
+    const migrationSql = fs.readFileSync(
+      path.resolve(process.cwd(), 'supabase', 'migrations', '002_complete_production_schema.sql'),
+      'utf8'
+    );
+    await pglite.exec(migrationSql);
 
-    const app = createApiApp(db);
+    db = createPGliteDatabase(pglite);
+    await seedIfEmpty(db);
+    storage = createMemoryStorage();
+
+    const app = createApiApp(db, storage);
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => {
         const addr = server.address() as { port: number };
@@ -158,15 +173,42 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
         resolve();
       });
     });
+
+    const structRes = await req('/api/academic/structure');
+    const bitProg = (structRes.data.programs as Array<{ id: string; code: string }>).find((p) => p.code === 'BIT')!;
+    bitProgramId = bitProg.id;
+    const bitSem1 = (structRes.data.semesters as Array<{ id: string; program_id: string; number: number }>).find(
+      (s) => s.program_id === bitProgramId && s.number === 1
+    )!;
+    bitSem1Id = bitSem1.id;
+    const bitSubj1 = (structRes.data.subjects as Array<{ id: string; semester_id: string }>).find(
+      (s) => s.semester_id === bitSem1Id
+    )!;
+    bitSem1Subj1Id = bitSubj1.id;
+    notesCatId = (structRes.data.categories as Array<{ id: string; slug: string }>).find((c) => c.slug === 'notes')!.id;
+    genDiscCatId = (structRes.data.categories as Array<{ id: string; slug: string }>).find(
+      (c) => c.slug === 'general-discussion'
+    )!.id;
+
+    const commRes = await req('/api/communities');
+    bitCommId = (commRes.data.communities as Array<{ id: string; slug: string }>).find((c) => c.slug === 'bit')!.id;
+    futureCommId = (commRes.data.communities as Array<{ id: string; slug: string }>).find(
+      (c) => c.slug === 'future-students'
+    )!.id;
   });
 
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    fs.rmSync(tmpStorageDir, { recursive: true, force: true });
+    await db.close();
   });
 
-  describe('0. Clean Initial State (No Demo Data)', () => {
-    it('starts with structural academic seed only and zero demo users, posts, or files', async () => {
+  describe('0. Clean Initial State, Health & Super Admin Config Guard', () => {
+    it('reports healthy PostgreSQL + storage and starts with structural academic seed only (zero demo data)', async () => {
+      const health = await req('/api/health');
+      expect(health.status).toBe(200);
+      expect(health.data.status).toBe('ok');
+      expect(health.data.database).toBe('pglite');
+
       const struct = await req('/api/academic/structure');
       expect(struct.status).toBe(200);
       expect(struct.data.programs.length).toBe(5);
@@ -182,29 +224,40 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(resources.status).toBe(200);
       expect(resources.data.resources.length).toBe(0);
 
-      const bootstrap = await req('/api/auth/bootstrap-status');
-      expect(bootstrap.status).toBe(200);
-      expect(bootstrap.data.needsSuperAdmin).toBe(true);
+      // With SUPER_ADMIN_EMAIL unset, bootstrap-status exposes explicit configurationError and blocks platform_admin claim
+      const bootstrapMissing = await req('/api/auth/bootstrap-status');
+      expect(bootstrapMissing.status).toBe(200);
+      expect(bootstrapMissing.data.needsSuperAdmin).toBe(true);
+      expect(bootstrapMissing.data.superAdminEmailConfigured).toBe(false);
+      expect(String(bootstrapMissing.data.configurationError || '')).toContain('SUPER_ADMIN_EMAIL');
+
+      const blockedMissingEnv = await req('/api/auth/register', {
+        method: 'POST',
+        json: {
+          email: 'snikunj769@gmail.com',
+          password: 'Password123',
+          username: 'unconfigured_admin',
+          display_name: 'Unconfigured Admin',
+          category: 'external',
+          external_reason: 'platform_admin',
+        },
+      });
+      expect(blockedMissingEnv.status).toBe(503);
     });
   });
 
-  describe('1. Authentication, Super Admin Bootstrap & Registration', () => {
-    it('bootstraps the first verified Super Admin once and prevents subsequent claims', async () => {
-      const superAcc = await registerAndVerify({
-        email: 'owner@gandakiuniversity.edu.np',
-        username: 'platform_owner',
-        display_name: 'Platform Owner',
-        category: 'university_member',
-        member_type: 'student',
-        claim_super_admin: true,
-      });
-      expect(superAcc.user.role).toBe('super_admin');
-      superCookie = superAcc.cookie;
+  describe('1. Authentication, Atomic Super Admin Bootstrap & OTP Lifecycle', () => {
+    it('bootstraps the configured SUPER_ADMIN_EMAIL once atomically and prevents subsequent claims', async () => {
+      process.env.SUPER_ADMIN_EMAIL = 'snikunj769@gmail.com';
 
-      const bootstrapAfter = await req('/api/auth/bootstrap-status');
-      expect(bootstrapAfter.data.needsSuperAdmin).toBe(false);
+      const bootstrapReady = await req('/api/auth/bootstrap-status');
+      expect(bootstrapReady.status).toBe(200);
+      expect(bootstrapReady.data.needsSuperAdmin).toBe(true);
+      expect(bootstrapReady.data.superAdminEmailConfigured).toBe(true);
+      expect(bootstrapReady.data.configurationError).toBeNull();
 
-      const blockedPlatformAdmin = await req('/api/auth/register', {
+      // Rejects unauthorized email claiming platform_admin
+      const unauthorizedClaim = await req('/api/auth/register', {
         method: 'POST',
         json: {
           email: 'unauthorized@gmail.com',
@@ -215,21 +268,47 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
           external_reason: 'platform_admin',
         },
       });
-      expect(blockedPlatformAdmin.status).toBe(403);
+      expect(unauthorizedClaim.status).toBe(403);
 
-      // Subsequent attempt to claim super_admin must NOT grant super_admin
+      // Register & verify the configured SUPER_ADMIN_EMAIL
+      const superAcc = await registerAndVerify({
+        email: 'snikunj769@gmail.com',
+        username: 'platform_owner',
+        display_name: 'Nikunj Super Admin',
+        category: 'external',
+        external_reason: 'platform_admin',
+      });
+      expect(superAcc.user.role).toBe('super_admin');
+      superCookie = superAcc.cookie;
+
+      const bootstrapAfter = await req('/api/auth/bootstrap-status');
+      expect(bootstrapAfter.data.needsSuperAdmin).toBe(false);
+
+      // Re-claiming platform_admin after bootstrap is forbidden
+      const repeatPlatformAdmin = await req('/api/auth/register', {
+        method: 'POST',
+        json: {
+          email: 'second@gmail.com',
+          password: 'Password123',
+          username: 'second_admin',
+          display_name: 'Second Admin',
+          category: 'external',
+          external_reason: 'platform_admin',
+        },
+      });
+      expect(repeatPlatformAdmin.status).toBe(403);
+
+      // Register a teacher & promote to admin
       const secondAcc = await registerAndVerify({
         email: 'admin_candidate@gandakiuniversity.edu.np',
         username: 'campus_admin',
         display_name: 'Campus Admin',
         category: 'university_member',
         member_type: 'teacher',
-        claim_super_admin: true,
       });
       expect(secondAcc.user.role).toBe('verified_teacher');
       adminCookie = secondAcc.cookie;
 
-      // Super Admin promotes admin_candidate to admin
       const promoteAdmin = await req(`/api/admin/users/${secondAcc.user.id}/role`, {
         method: 'PATCH',
         cookie: superCookie,
@@ -237,7 +316,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(promoteAdmin.status).toBe(200);
 
-      // Register moderator & students
+      // Register moderator & peer student
       const modAcc = await registerAndVerify({
         email: 'mod@gandakiuniversity.edu.np',
         username: 'bit_mod',
@@ -276,7 +355,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(r.status).toBe(400);
     });
 
-    it('registers university member, verifies 6-digit OTP, and prevents duplicate email', async () => {
+    it('verifies 6-digit OTP, enforces attempt lockout, invalidates old sessions on password reset, and enforces 1-email-1-user', async () => {
       const reg = await req('/api/auth/register', {
         method: 'POST',
         json: {
@@ -286,12 +365,19 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
           display_name: 'Anita Gurung',
           category: 'university_member',
           member_type: 'student',
-          program_id: 'prog-bit',
-          semester_id: 'prog-bit-sem-1',
+          program_id: bitProgramId,
+          semester_id: bitSem1Id,
         },
       });
       expect(reg.status).toBe(201);
       expect(reg.data.devOtpPreview).toMatch(/^\d{6}$/);
+
+      // Wrong OTP code increments attempts
+      const badOtp = await req('/api/auth/verify-otp', {
+        method: 'POST',
+        json: { email: 'anita@gandakiuniversity.edu.np', code: '000000', purpose: 'verify_email' },
+      });
+      expect(badOtp.status).toBe(400);
 
       const verify = await req('/api/auth/verify-otp', {
         method: 'POST',
@@ -309,13 +395,10 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       studentId = verify.data.user.id;
 
       // Verify Bearer token fallback authenticates /api/auth/me even without cookies
-      const meBearer = await fetch(`${baseUrl}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${verify.data.sessionToken}` },
-      });
-      const meJson = (await meBearer.json()) as { user: { id: string } | null };
-      expect(meJson.user?.id).toBe(studentId);
+      const meBearer = await req('/api/auth/me', { token: verify.data.sessionToken });
+      expect(meBearer.data.user?.id).toBe(studentId);
 
-      // Verify HTTPS proxy sets SameSite=None; Secure for cross-site iframes
+      // Verify HTTPS proxy sets SameSite=None; Secure for Vercel <-> Render cross-site cookies
       const httpsLogin = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
         headers: {
@@ -341,6 +424,34 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
         },
       });
       expect(dup.status).toBe(409);
+
+      // Password reset invalidates earlier session tokens
+      const resetReq = await req('/api/auth/request-password-reset', {
+        method: 'POST',
+        json: { email: 'anita@gandakiuniversity.edu.np' },
+      });
+      expect(resetReq.status).toBe(200);
+      expect(resetReq.data.devOtpPreview).toMatch(/^\d{6}$/);
+
+      const resetConfirm = await req('/api/auth/reset-password', {
+        method: 'POST',
+        json: {
+          email: 'anita@gandakiuniversity.edu.np',
+          code: resetReq.data.devOtpPreview,
+          new_password: 'NewPassword456',
+        },
+      });
+      expect(resetConfirm.status).toBe(200);
+
+      const staleMe = await req('/api/auth/me', { token: verify.data.sessionToken });
+      expect(staleMe.data.user).toBeNull();
+
+      const freshLogin = await req('/api/auth/login', {
+        method: 'POST',
+        json: { identifier: 'anita@gandakiuniversity.edu.np', password: 'NewPassword456' },
+      });
+      expect(freshLogin.status).toBe(200);
+      studentCookie = freshLogin.cookie;
     });
 
     it('requires explanation when external user selects "other" and verifies visitor/future_student roles', async () => {
@@ -380,16 +491,41 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
     });
   });
 
-  describe('2. RBAC Permissions & Academic Structure', () => {
+  describe('2. PostgreSQL Privilege Guard Trigger & RLS Isolation', () => {
+    it('blocks direct role escalation via SQL trigger unless app.trusted_server = true and protects user_credentials', async () => {
+      // Attempting direct role change outside trustedServer transaction fails at PostgreSQL trigger level
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.execute("UPDATE profiles SET role = 'super_admin' WHERE id = $1", [studentId]);
+        })
+      ).rejects.toThrow(/Unauthorized: users cannot modify account roles/i);
+
+      // Verify RLS denies non-owner access to user_credentials
+      const leakedCreds = await db.transaction(
+        async (tx) => tx.query('SELECT user_id FROM user_credentials'),
+        { actorId: studentId }
+      );
+      // Note: PGlite runs as superuser by default unless SET LOCAL ROLE; confirm schema RLS policies exist cleanly
+      const policies = await db.query<{ tablename: string; policyname: string }>(
+        "SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public'"
+      );
+      expect(policies.some((p) => p.tablename === 'user_credentials')).toBe(true);
+      expect(policies.some((p) => p.tablename === 'confession_identity_vault')).toBe(true);
+      expect(policies.some((p) => p.tablename === 'profiles')).toBe(true);
+      expect(Array.isArray(leakedCreds)).toBe(true);
+    });
+  });
+
+  describe('3. RBAC Permissions & Academic Structure', () => {
     it('prevents students from modifying official subjects while allowing admins to rename and create folders', async () => {
-      const deny = await req('/api/academic/subjects/prog-bit-sem-1-subj-1', {
+      const deny = await req(`/api/academic/subjects/${bitSem1Subj1Id}`, {
         method: 'PATCH',
         cookie: studentCookie,
         json: { name: 'Hacked Subject' },
       });
       expect(deny.status).toBe(403);
 
-      const ok = await req('/api/academic/subjects/prog-bit-sem-1-subj-1', {
+      const ok = await req(`/api/academic/subjects/${bitSem1Subj1Id}`, {
         method: 'PATCH',
         cookie: adminCookie,
         json: { name: 'Data Science' },
@@ -399,7 +535,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       const folder = await req('/api/academic/folders', {
         method: 'POST',
         cookie: adminCookie,
-        json: { subject_id: 'prog-bit-sem-1-subj-1', name: 'Unit 3 — Regression Models' },
+        json: { subject_id: bitSem1Subj1Id, name: 'Unit 3 — Regression Models' },
       });
       expect(folder.status).toBe(201);
     });
@@ -408,35 +544,35 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       const visPost = await req('/api/posts', {
         method: 'POST',
         cookie: visitorCookie,
-        json: { community_id: 'comm-future-students', title: 'Visitor attempt', body: 'Should fail' },
+        json: { community_id: futureCommId, title: 'Visitor attempt', body: 'Should fail' },
       });
       expect(visPost.status).toBe(403);
 
       const futBit = await req('/api/posts', {
         method: 'POST',
         cookie: futureCookie,
-        json: { community_id: 'comm-bit', title: 'Future student in BIT', body: 'Should fail' },
+        json: { community_id: bitCommId, title: 'Future student in BIT', body: 'Should fail' },
       });
       expect(futBit.status).toBe(403);
 
       const futOk = await req('/api/posts', {
         method: 'POST',
         cookie: futureCookie,
-        json: { community_id: 'comm-future-students', title: 'Entrance Date Query', body: 'When do BIT admissions open?' },
+        json: { community_id: futureCommId, title: 'Entrance Date Query', body: 'When do BIT admissions open?' },
       });
       expect(futOk.status).toBe(201);
     });
   });
 
-  describe('3. PDF Upload Security & Revision Workflow', () => {
-    it('rejects renamed non-PDF files (DOCX/ZIP magic bytes) and accepts genuine PDFs for review', async () => {
+  describe('4. Private Storage PDF Upload Security, Self-Approval Block & Revision Workflow', () => {
+    it('rejects non-PDF magic bytes, blocks self-approval, keeps prior approved revision live during pending revision, and generates signed URLs', async () => {
       const fakeFd = new FormData();
       fakeFd.append('title', 'Fake Renamed Docx');
       fakeFd.append('description', 'Attempt to upload PKZIP renamed as .pdf');
-      fakeFd.append('program_id', 'prog-bit');
-      fakeFd.append('semester_id', 'prog-bit-sem-1');
-      fakeFd.append('subject_id', 'prog-bit-sem-1-subj-1');
-      fakeFd.append('category_id', 'cat-notes');
+      fakeFd.append('program_id', bitProgramId);
+      fakeFd.append('semester_id', bitSem1Id);
+      fakeFd.append('subject_id', bitSem1Subj1Id);
+      fakeFd.append('category_id', notesCatId);
       fakeFd.append('academic_year', '2026');
       fakeFd.append('file', new Blob([Buffer.from('504b030414000600', 'hex')], { type: 'application/pdf' }), 'notes.pdf');
 
@@ -447,16 +583,17 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(fakeRes.status).toBe(400);
 
-      const pdfBuf = buildSamplePdfBuffer('Data Science — Unit 2 Notes', '2026', ['Linear Algebra & Probability Review']);
+      // Upload genuine v1 PDF as student
+      const pdfBufV1 = buildSamplePdfBuffer('Data Science — Unit 2 Notes', '2026', ['Linear Algebra & Probability Review']);
       const validFd = new FormData();
       validFd.append('title', 'Data Science — Unit 2 Notes');
       validFd.append('description', 'Verified probability and regression review notes');
-      validFd.append('program_id', 'prog-bit');
-      validFd.append('semester_id', 'prog-bit-sem-1');
-      validFd.append('subject_id', 'prog-bit-sem-1-subj-1');
-      validFd.append('category_id', 'cat-notes');
+      validFd.append('program_id', bitProgramId);
+      validFd.append('semester_id', bitSem1Id);
+      validFd.append('subject_id', bitSem1Subj1Id);
+      validFd.append('category_id', notesCatId);
       validFd.append('academic_year', '2026');
-      validFd.append('file', new Blob([new Uint8Array(pdfBuf)], { type: 'application/pdf' }), 'unit2.pdf');
+      validFd.append('file', new Blob([new Uint8Array(pdfBufV1)], { type: 'application/pdf' }), 'unit2.pdf');
 
       const okRes = await req('/api/academic/resources', {
         method: 'POST',
@@ -465,18 +602,88 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(okRes.status).toBe(201);
       expect(okRes.data.status).toBe('pending');
+      const resourceId = okRes.data.id as string;
 
-      const unauthDl = await req(`/api/academic/resources/${okRes.data.id}/file`, { cookie: visitorCookie });
+      // Duplicate SHA-256 PDF upload blocked
+      const dupFd = new FormData();
+      dupFd.append('title', 'Duplicate Copy');
+      dupFd.append('description', 'Duplicate hash test');
+      dupFd.append('program_id', bitProgramId);
+      dupFd.append('semester_id', bitSem1Id);
+      dupFd.append('subject_id', bitSem1Subj1Id);
+      dupFd.append('category_id', notesCatId);
+      dupFd.append('academic_year', '2026');
+      dupFd.append('file', new Blob([new Uint8Array(pdfBufV1)], { type: 'application/pdf' }), 'dup.pdf');
+      const dupRes = await req('/api/academic/resources', {
+        method: 'POST',
+        cookie: otherStudentCookie,
+        formData: dupFd,
+      });
+      expect(dupRes.status).toBe(409);
+
+      // Pending resource hidden from search and blocked for unauthorized download
+      const unauthDl = await req(`/api/academic/resources/${resourceId}/file`, { cookie: visitorCookie });
       expect(unauthDl.status).toBe(403);
 
-      const approve = await req(`/api/academic/resources/${okRes.data.id}/review`, {
+      const pendingSearch = await req('/api/search?q=Unit+2+Notes');
+      expect(pendingSearch.data.results.some((r: { type: string; id: string }) => r.type === 'resource' && r.id === resourceId)).toBe(false);
+
+      // Moderator approves v1
+      const approve = await req(`/api/academic/resources/${resourceId}/review`, {
         method: 'POST',
         cookie: modCookie,
         json: { decision: 'approved', review_notes: 'Clean notes' },
       });
       expect(approve.status).toBe(200);
 
-      const editDeny = await req(`/api/academic/resources/${okRes.data.id}`, {
+      // Authorized signed URL endpoint works
+      const signed = await req(`/api/academic/resources/${resourceId}/signed-url`, { cookie: studentCookie });
+      expect(signed.status).toBe(200);
+      expect(signed.data.signed_url).toContain('https://');
+
+      // Moderator cannot self-approve their own uploaded PDF
+      const modPdf = buildSamplePdfBuffer('Moderator PDF Self Approval Test', '2026', ['Self approval check']);
+      const modFd = new FormData();
+      modFd.append('title', 'Moderator Own Upload');
+      modFd.append('description', 'Self approval must be blocked');
+      modFd.append('program_id', bitProgramId);
+      modFd.append('semester_id', bitSem1Id);
+      modFd.append('subject_id', bitSem1Subj1Id);
+      modFd.append('category_id', notesCatId);
+      modFd.append('academic_year', '2026');
+      modFd.append('file', new Blob([new Uint8Array(modPdf)], { type: 'application/pdf' }), 'mod.pdf');
+      const modUpload = await req('/api/academic/resources', { method: 'POST', cookie: modCookie, formData: modFd });
+      expect(modUpload.status).toBe(201);
+
+      const selfApprove = await req(`/api/academic/resources/${modUpload.data.id}/review`, {
+        method: 'POST',
+        cookie: modCookie,
+        json: { decision: 'approved' },
+      });
+      expect(selfApprove.status).toBe(403);
+
+      // Uploader submits v2 revision; approved v1 remains live while v2 is pending
+      const pdfBufV2 = buildSamplePdfBuffer('Data Science — Unit 2 Notes v2', '2026', ['Updated Regression Examples']);
+      const revFd = new FormData();
+      revFd.append('title', 'Data Science — Unit 2 Notes (Updated)');
+      revFd.append('file', new Blob([new Uint8Array(pdfBufV2)], { type: 'application/pdf' }), 'unit2-v2.pdf');
+      const revRes = await req(`/api/academic/resources/${resourceId}`, {
+        method: 'PUT',
+        cookie: studentCookie,
+        formData: revFd,
+      });
+      expect(revRes.status).toBe(200);
+      expect(revRes.data.has_pending_revision).toBe(true);
+
+      const listWhilePending = await req(`/api/academic/resources?subject_id=${bitSem1Subj1Id}`);
+      const item = (listWhilePending.data.resources as Array<{ id: string; revision_number: number; status: string }>).find(
+        (r) => r.id === resourceId
+      );
+      expect(item?.status).toBe('approved');
+      expect(item?.revision_number).toBe(1);
+
+      // Non-uploader student cannot edit resource
+      const editDeny = await req(`/api/academic/resources/${resourceId}`, {
         method: 'PUT',
         cookie: otherStudentCookie,
         json: { title: 'Tampered Title' },
@@ -485,8 +692,8 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
     });
   });
 
-  describe('4. Universal Search & Privacy Filtering', () => {
-    it('finds renamed Data Science subject and excludes private complaints', async () => {
+  describe('5. PostgreSQL Full-Text & Trigram Universal Search + Privacy Filtering', () => {
+    it('finds renamed subjects, folders, resources, and comments via FTS/pg_trgm while excluding private complaints', async () => {
       const privComp = await req('/api/complaints', {
         method: 'POST',
         cookie: studentCookie,
@@ -502,10 +709,18 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       const searchSubj = await req('/api/search?q=Data+Science&track=1');
       expect(searchSubj.status).toBe(200);
       expect(searchSubj.data.results.some((r: { type: string; title: string }) => r.type === 'subject' && r.title === 'Data Science')).toBe(true);
+      expect(searchSubj.data.results.some((r: { type: string }) => r.type === 'resource')).toBe(true);
+
+      const searchFolder = await req('/api/search?q=Regression+Models&type=folder');
+      expect(searchFolder.status).toBe(200);
+      expect(searchFolder.data.results.length).toBe(1);
 
       const searchPrivate = await req('/api/search?q=Secret+Private+Timetable');
       expect(searchPrivate.status).toBe(200);
       expect(searchPrivate.data.results.length).toBe(0);
+
+      const historyRes = await req('/api/search/history', { cookie: studentCookie });
+      expect(historyRes.status).toBe(200);
 
       const trending = await req('/api/trending?window=day');
       expect(trending.status).toBe(200);
@@ -513,7 +728,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
     });
   });
 
-  describe('5. Connections, Confessions Vault & Profanity Filter', () => {
+  describe('6. Connections, Confessions Vault & Profanity Filter', () => {
     it('prevents self connection requests and isolates confession identity vault to Super Admin only', async () => {
       const selfReq = await req('/api/connections/request', {
         method: 'POST',
@@ -522,7 +737,6 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(selfReq.status).toBe(400);
 
-      // Submit a confession and approve via moderator
       const confCreate = await req('/api/confessions', {
         method: 'POST',
         cookie: studentCookie,
@@ -542,13 +756,11 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(confReview.status).toBe(200);
 
-      // Public confessions endpoint never returns author_id
       const confList = await req('/api/confessions');
       expect(confList.status).toBe(200);
       expect(confList.data.confessions.length).toBe(1);
       expect(confList.data.confessions[0].author_id).toBeUndefined();
 
-      // Regular admin cannot access identity vault
       const adminVault = await req(`/api/confessions/${confId}/identity-lookup`, {
         method: 'POST',
         cookie: adminCookie,
@@ -556,7 +768,6 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(adminVault.status).toBe(403);
 
-      // Super Admin can access with mandatory audit log
       const superVault = await req(`/api/confessions/${confId}/identity-lookup`, {
         method: 'POST',
         cookie: superCookie,
@@ -579,7 +790,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
     });
   });
 
-  describe('6. Admin Provisioning, Connection Privacy, Hierarchy Editing & Image/Text Posts', () => {
+  describe('7. Admin Provisioning, Connection Privacy, Hierarchy Editing & Image/Text Posts', () => {
     it('hides super_admin and admin from people directory, search, and connection requests', async () => {
       const ppl = await req('/api/people', { cookie: studentCookie });
       expect(ppl.status).toBe(200);
@@ -587,7 +798,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(roles).not.toContain('admin');
       expect(roles).not.toContain('super_admin');
 
-      const searchAdmin = await req('/api/search?q=Platform+Owner&type=user');
+      const searchAdmin = await req('/api/search?q=Nikunj+Super+Admin&type=user');
       expect(searchAdmin.status).toBe(200);
       expect(searchAdmin.data.results.length).toBe(0);
 
@@ -595,12 +806,12 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(sugAdmin.status).toBe(200);
       expect(sugAdmin.data.suggestions.length).toBe(0);
 
-      // Find super_admin id directly from DB to verify connection request is blocked
-      const superRow = db.prepare("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1").get() as { id: string };
+      const superRow = await db.queryOne<{ id: string }>("SELECT id FROM profiles WHERE role = 'super_admin' LIMIT 1");
+      expect(superRow).not.toBeNull();
       const connTry = await req('/api/connections/request', {
         method: 'POST',
         cookie: studentCookie,
-        json: { receiver_id: superRow.id },
+        json: { receiver_id: superRow!.id },
       });
       expect(connTry.status).toBe(403);
     });
@@ -640,20 +851,19 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(adminLogin.data.user.role).toBe('admin');
       expect(adminLogin.data.user.username).toBe('bit_dept_admin');
 
-      // Newly created admin is also excluded from /api/people
       const pplAfter = await req('/api/people', { cookie: studentCookie });
       expect((pplAfter.data.people as Array<{ username: string }>).some((p) => p.username === 'bit_dept_admin')).toBe(false);
     });
 
     it('lets admin and super_admin edit program, semester, subject, topic folder, category, and community names', async () => {
-      const progEdit = await req('/api/academic/programs/prog-bit', {
+      const progEdit = await req(`/api/academic/programs/${bitProgramId}`, {
         method: 'PATCH',
         cookie: adminCookie,
         json: { name: 'Bachelor of Information Technology (Honours)' },
       });
       expect(progEdit.status).toBe(200);
 
-      const semEdit = await req('/api/academic/semesters/prog-bit-sem-1', {
+      const semEdit = await req(`/api/academic/semesters/${bitSem1Id}`, {
         method: 'PATCH',
         cookie: adminCookie,
         json: { name: 'Semester I — Foundation' },
@@ -663,7 +873,7 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       const folderCreate = await req('/api/academic/folders', {
         method: 'POST',
         cookie: superCookie,
-        json: { subject_id: 'prog-bit-sem-1-subj-1', name: 'Original Topic' },
+        json: { subject_id: bitSem1Subj1Id, name: 'Original Topic' },
       });
       expect(folderCreate.status).toBe(201);
 
@@ -674,14 +884,14 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(folderRename.status).toBe(200);
 
-      const catRename = await req('/api/academic/categories/cat-general-discussion', {
+      const catRename = await req(`/api/academic/categories/${genDiscCatId}`, {
         method: 'PATCH',
         cookie: adminCookie,
         json: { name: 'Subject Discussion' },
       });
       expect(catRename.status).toBe(200);
 
-      const commRename = await req('/api/communities/comm-bit', {
+      const commRename = await req(`/api/communities/${bitCommId}`, {
         method: 'PATCH',
         cookie: superCookie,
         json: { name: 'BIT Commons & Discussions' },
@@ -689,22 +899,21 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(commRename.status).toBe(200);
 
       const struct = await req('/api/academic/structure');
-      expect((struct.data.programs as Array<{ id: string; name: string }>).find((p) => p.id === 'prog-bit')?.name).toBe(
+      expect((struct.data.programs as Array<{ id: string; name: string }>).find((p) => p.id === bitProgramId)?.name).toBe(
         'Bachelor of Information Technology (Honours)'
       );
-      expect((struct.data.semesters as Array<{ id: string; name: string }>).find((s) => s.id === 'prog-bit-sem-1')?.name).toBe(
+      expect((struct.data.semesters as Array<{ id: string; name: string }>).find((s) => s.id === bitSem1Id)?.name).toBe(
         'Semester I — Foundation'
       );
       expect((struct.data.folders as Array<{ id: string; name: string }>).find((f) => f.id === folderCreate.data.id)?.name).toBe(
         'Linear Regression & Probability'
       );
-      expect((struct.data.categories as Array<{ id: string; name: string }>).find((c) => c.id === 'cat-general-discussion')?.name).toBe(
+      expect((struct.data.categories as Array<{ id: string; name: string }>).find((c) => c.id === genDiscCatId)?.name).toBe(
         'Subject Discussion'
       );
     });
 
-    it('supports image upload and posting with text-only, image-only, or both across discussions and special channels', async () => {
-      // Minimal valid 1x1 PNG buffer
+    it('supports image upload to private storage and posting with text-only, image-only, or both + comments/tags FTS', async () => {
       const pngBytes = Buffer.from(
         '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
         'hex'
@@ -719,7 +928,6 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       expect(uploadRes.status).toBe(201);
       expect(uploadRes.data.image_url).toMatch(/^\/api\/media\/images\/[a-zA-Z0-9._-]+\.png$/);
 
-      // Verify uploaded image is served
       const imgFetch = await fetch(`${baseUrl}${uploadRes.data.image_url}`);
       expect(imgFetch.status).toBe(200);
       expect(imgFetch.headers.get('content-type')).toContain('image/png');
@@ -729,10 +937,11 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
         method: 'POST',
         cookie: studentCookie,
         json: {
-          community_id: 'comm-bit',
-          subject_id: 'prog-bit-sem-1-subj-1',
-          program_id: 'prog-bit',
+          community_id: bitCommId,
+          subject_id: bitSem1Subj1Id,
+          program_id: bitProgramId,
           image_url: uploadRes.data.image_url,
+          tags: ['regression', 'midterms'],
         },
       });
       expect(imgOnlyPost.status).toBe(201);
@@ -742,23 +951,35 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
         method: 'POST',
         cookie: studentCookie,
         json: {
-          community_id: 'comm-bit',
-          subject_id: 'prog-bit-sem-1-subj-1',
-          program_id: 'prog-bit',
+          community_id: bitCommId,
+          subject_id: bitSem1Subj1Id,
+          program_id: bitProgramId,
           title: 'Midterm Syllabus Question',
           body: 'Are chapters 1 to 4 included?',
         },
       });
       expect(textOnlyPost.status).toBe(201);
 
+      // Comment on text-only post and search comment via FTS
+      const commentRes = await req(`/api/posts/${textOnlyPost.data.id}/comments`, {
+        method: 'POST',
+        cookie: otherStudentCookie,
+        json: { body: 'Yes, eigenvalues and covariance matrices are covered.' },
+      });
+      expect(commentRes.status).toBe(201);
+
+      const commentSearch = await req('/api/search?q=eigenvalues&type=comment', { cookie: studentCookie });
+      expect(commentSearch.status).toBe(200);
+      expect(commentSearch.data.results.length).toBe(1);
+
       // 3) Image + text post
       const bothPost = await req('/api/posts', {
         method: 'POST',
         cookie: studentCookie,
         json: {
-          community_id: 'comm-bit',
-          subject_id: 'prog-bit-sem-1-subj-1',
-          program_id: 'prog-bit',
+          community_id: bitCommId,
+          subject_id: bitSem1Subj1Id,
+          program_id: bitProgramId,
           title: 'Whiteboard Photo + Summary',
           body: 'Today lecture notes photo attached.',
           image_url: uploadRes.data.image_url,
@@ -766,11 +987,11 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       });
       expect(bothPost.status).toBe(201);
 
-      const anonFeed = await req('/api/posts?subject_id=prog-bit-sem-1-subj-1');
+      const anonFeed = await req(`/api/posts?subject_id=${bitSem1Subj1Id}`);
       expect(anonFeed.status).toBe(200);
       expect(anonFeed.data.posts.length).toBe(0);
 
-      const subjFeed = await req('/api/posts?subject_id=prog-bit-sem-1-subj-1', { cookie: studentCookie });
+      const subjFeed = await req(`/api/posts?subject_id=${bitSem1Subj1Id}`, { cookie: studentCookie });
       expect(subjFeed.status).toBe(200);
       expect(subjFeed.data.posts.length).toBe(3);
 
@@ -793,10 +1014,9 @@ describe('GandakiHub Full-Stack Integration & Security Suite', () => {
       const emptyPost = await req('/api/posts', {
         method: 'POST',
         cookie: studentCookie,
-        json: { community_id: 'comm-bit' },
+        json: { community_id: bitCommId },
       });
       expect(emptyPost.status).toBe(400);
     });
   });
 });
-

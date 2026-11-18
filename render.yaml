@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: gandakihub-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build:server
+    startCommand: node dist-server/server.mjs
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gandakihub-private
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: GandakiHub <onboarding@resend.dev>
+      - key: SESSION_SECRET
+        sync: false
+      - key: SUPER_ADMIN_EMAIL
+        value: snikunj769@gmail.com
+      - key: CORS_ORIGIN
+        sync: false
+      - key: ALLOW_VERCEL_PREVIEWS
+        value: "false"

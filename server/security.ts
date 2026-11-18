@@ -1,8 +1,23 @@
 import crypto from 'node:crypto';
 import type { UserRole } from '../src/types/index.ts';
 
-const SESSION_SECRET =
-  process.env.SESSION_SECRET || 'gandakihub-local-dev-secret-do-not-use-in-prod';
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EPHEMERAL_DEV_SECRET = crypto.randomBytes(32).toString('hex');
+
+export function isUuid(value: string | undefined | null): value is string {
+  return Boolean(value && UUID_REGEX.test(value.trim()));
+}
+
+export function getSessionSecret(): string {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (process.env.NODE_ENV === 'production') {
+    if (!configured || configured.length < 32 || configured.includes('change-me')) {
+      throw new Error('SESSION_SECRET must be set to a strong random string (at least 32 characters) in production.');
+    }
+    return configured;
+  }
+  return configured || EPHEMERAL_DEV_SECRET;
+}
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -25,7 +40,7 @@ export function generateSixDigitOtp(): string {
 }
 
 export function hashToken(raw: string): string {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(raw).digest('hex');
+  return crypto.createHmac('sha256', getSessionSecret()).update(raw).digest('hex');
 }
 
 export function generateSessionToken(): string {
@@ -46,22 +61,28 @@ export function sanitizeFilename(name: string): string {
 
 /**
  * Validates that a buffer is genuinely a PDF document:
- * 1. Begins with %PDF-1.x or %PDF-2.x magic bytes
- * 2. Contains /Type or /Root or obj/endobj PDF object markers
- * 3. Contains %%EOF near the end (not a renamed DOCX/ZIP/EXE/image)
+ * 1. Rejects ZIP/Office archives (PK), executables (MZ), and image headers
+ * 2. Begins with %PDF-1.x or %PDF-2.x magic bytes
+ * 3. Contains obj/endobj PDF object markers
+ * 4. Contains %%EOF near the end
  */
 export function validatePdfBuffer(buffer: Buffer): { valid: boolean; reason?: string } {
   if (!buffer || buffer.length < 32) {
     return { valid: false, reason: 'File is too small to be a valid PDF document.' };
   }
 
-  // Reject ZIP / DOCX / XLSX / PPTX (PK\x03\x04), EXE (MZ), PNG, JPEG, GIF
-  const headHex = buffer.subarray(0, 4).toString('hex').toLowerCase();
+  const headHex = buffer.subarray(0, 8).toString('hex').toLowerCase();
   if (headHex.startsWith('504b0304')) {
     return { valid: false, reason: 'ZIP or Office archive detected (e.g. DOCX/PPTX). Only genuine PDF files are allowed.' };
   }
   if (headHex.startsWith('4d5a')) {
     return { valid: false, reason: 'Executable files are strictly prohibited.' };
+  }
+  if (headHex.startsWith('89504e47') || headHex.startsWith('ffd8ff') || headHex.startsWith('47494638')) {
+    return { valid: false, reason: 'Image files are not allowed in PDF-only academic categories.' };
+  }
+  if (headHex.startsWith('52617221')) {
+    return { valid: false, reason: 'RAR archives are not allowed. Upload a genuine PDF file.' };
   }
 
   const header = buffer.subarray(0, 16).toString('ascii');
@@ -118,16 +139,14 @@ export function canPostInCommunity(
     }
     return {
       allowed: false,
-      reason: 'Future Student accounts can participate in the Future Students community only.'
+      reason: 'Future Student accounts can participate in the Future Students community only.',
     };
   }
-  if (communityKind === 'academic') {
-    if (role === 'alumni') {
-      return {
-        allowed: false,
-        reason: 'Alumni cannot post in current-semester academic communities.'
-      };
-    }
+  if (communityKind === 'academic' && role === 'alumni') {
+    return {
+      allowed: false,
+      reason: 'Alumni cannot post in current-semester academic communities.',
+    };
   }
   return { allowed: true };
 }

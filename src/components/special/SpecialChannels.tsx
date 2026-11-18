@@ -12,7 +12,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatRelativeDate } from '../../lib/api.ts';
+import { api, formatRelativeDate, resolveApiUrl } from '../../lib/api.ts';
 import type {
   Complaint,
   Confession,
@@ -159,7 +159,7 @@ export function ConfessionsView() {
             {c.body && <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{c.body}</p>}
             {c.image_url && (
               <img
-                src={c.image_url}
+                src={resolveApiUrl(c.image_url)}
                 alt={c.title || 'Confession attachment'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -332,7 +332,7 @@ export function ComplaintsView() {
             {c.body && <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{c.body}</p>}
             {c.image_url && (
               <img
-                src={c.image_url}
+                src={resolveApiUrl(c.image_url)}
                 alt={c.title || 'Complaint attachment'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -472,7 +472,7 @@ export function IdeasView() {
             {idea.proposed_solution && <p className="text-xs text-slate-700 dark:text-slate-300"><strong>Solution:</strong> {idea.proposed_solution}</p>}
             {idea.image_url && (
               <img
-                src={idea.image_url}
+                src={resolveApiUrl(idea.image_url)}
                 alt={idea.title || 'Idea sketch or diagram'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -608,7 +608,7 @@ export function DonationsView() {
             {d.description && <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{d.description}</p>}
             {d.image_url && (
               <img
-                src={d.image_url}
+                src={resolveApiUrl(d.image_url)}
                 alt={d.title || 'Donation request attachment'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -762,7 +762,7 @@ export function OpportunitiesView() {
             {o.description && <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{o.description}</p>}
             {o.image_url && (
               <img
-                src={o.image_url}
+                src={resolveApiUrl(o.image_url)}
                 alt={o.title || 'Opportunity flyer or image'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -893,7 +893,7 @@ export function EventsView() {
             {ev.description && <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{ev.description}</p>}
             {ev.image_url && (
               <img
-                src={ev.image_url}
+                src={resolveApiUrl(ev.image_url)}
                 alt={ev.title || 'Event poster or attachment'}
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
@@ -1013,7 +1013,7 @@ export function StudyGroupsView() {
               {sg.description && <p className="text-xs text-slate-600 dark:text-slate-300 whitespace-pre-wrap">{sg.description}</p>}
               {sg.image_url && (
                 <img
-                  src={sg.image_url}
+                  src={resolveApiUrl(sg.image_url)}
                   alt={sg.name}
                   className="max-h-60 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
                 />

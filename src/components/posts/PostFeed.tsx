@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatRelativeDate, formatRoleLabel } from '../../lib/api.ts';
+import { api, formatRelativeDate, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type { CommentItem, Community, Post } from '../../types/index.ts';
 import { ImageAttachmentField } from '../common/ImageAttachmentField.tsx';
 
@@ -502,7 +502,7 @@ export function PostFeed({
                   )}
                   {post.image_url && (
                     <img
-                      src={post.image_url}
+                      src={resolveApiUrl(post.image_url)}
                       alt={post.title || 'Discussion image attachment'}
                       className="max-h-[420px] w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
                     />

@@ -24,8 +24,8 @@ export function AuthModal() {
   const [regPassword, setRegPassword] = useState('');
   const [regUsername, setRegUsername] = useState('');
   const [regDisplayName, setRegDisplayName] = useState('');
-  const [regProgramId, setRegProgramId] = useState('prog-bit');
-  const [regSemesterId, setRegSemesterId] = useState('prog-bit-sem-1');
+  const [regProgramId, setRegProgramId] = useState('');
+  const [regSemesterId, setRegSemesterId] = useState('');
   const [extReason, setExtReason] = useState<ExternalReason>('future_student');
   const [extDetail, setExtDetail] = useState('');
 
@@ -45,8 +45,20 @@ export function AuthModal() {
   const [bootstrapStatus, setBootstrapStatus] = useState<{
     needsSuperAdmin: boolean;
     superAdminEmailConfigured: boolean;
+    configurationError?: string | null;
   } | null>(null);
-  const [claimSuperAdmin, setClaimSuperAdmin] = useState(false);
+
+  useEffect(() => {
+    if (!regProgramId && structure.programs.length > 0) {
+      const firstProg = structure.programs[0].id;
+      setRegProgramId(firstProg);
+      const firstSem = structure.semesters.find((s) => s.program_id === firstProg);
+      if (firstSem) setRegSemesterId(firstSem.id);
+    } else if (regProgramId && !regSemesterId) {
+      const firstSem = structure.semesters.find((s) => s.program_id === regProgramId);
+      if (firstSem) setRegSemesterId(firstSem.id);
+    }
+  }, [structure.programs, structure.semesters, regProgramId, regSemesterId]);
 
   useEffect(() => {
     if (!authModalOpen) return;
@@ -61,7 +73,11 @@ export function AuthModal() {
       setLoginRoleMode('member');
     }
     api
-      .get<{ needsSuperAdmin: boolean; superAdminEmailConfigured: boolean }>('/api/auth/bootstrap-status')
+      .get<{
+        needsSuperAdmin: boolean;
+        superAdminEmailConfigured: boolean;
+        configurationError?: string | null;
+      }>('/api/auth/bootstrap-status')
       .then(setBootstrapStatus)
       .catch(() => {});
   }, [authModalOpen, authModalMode]);
@@ -119,11 +135,10 @@ export function AuthModal() {
           display_name: regDisplayName,
           category: regCategory,
           member_type: memberType,
-          program_id: regCategory === 'university_member' ? regProgramId : null,
-          semester_id: regCategory === 'university_member' && memberType === 'student' ? regSemesterId : null,
+          program_id: regCategory === 'university_member' ? regProgramId || null : null,
+          semester_id: regCategory === 'university_member' && memberType === 'student' ? regSemesterId || null : null,
           external_reason: regCategory === 'external' ? extReason : null,
           external_reason_detail: regCategory === 'external' ? extDetail : null,
-          claim_super_admin: claimSuperAdmin,
         }
       );
       setOtpEmail(res.email);
@@ -288,20 +303,24 @@ export function AuthModal() {
                   <p>
                     Admins sign in with the <span className="font-mono">username</span> and password created by the Super Admin. Super Admin signs in with their email (<span className="font-mono">SUPER_ADMIN_EMAIL</span>).
                   </p>
-                  {bootstrapStatus?.needsSuperAdmin && (
+                  {bootstrapStatus?.needsSuperAdmin && bootstrapStatus.superAdminEmailConfigured && (
                     <button
                       type="button"
                       onClick={() => {
                         setTab('register');
                         setRegCategory('external');
                         setExtReason('platform_admin');
-                        setClaimSuperAdmin(true);
                         setError('');
                       }}
                       className="text-blue-700 dark:text-blue-400 font-medium hover:underline"
                     >
                       First time? Register your Super Admin account under External Users &rarr;
                     </button>
+                  )}
+                  {bootstrapStatus?.needsSuperAdmin && !bootstrapStatus.superAdminEmailConfigured && (
+                    <p className="text-amber-700 dark:text-amber-400 font-medium">
+                      {bootstrapStatus.configurationError || 'SUPER_ADMIN_EMAIL is not configured on the backend server.'}
+                    </p>
                   )}
                 </div>
               )}
@@ -425,7 +444,6 @@ export function AuthModal() {
                       onChange={(e) => {
                         const val = e.target.value as ExternalReason;
                         setExtReason(val);
-                        if (val === 'platform_admin') setClaimSuperAdmin(true);
                       }}
                       className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
                     >
@@ -434,7 +452,7 @@ export function AuthModal() {
                       <option value="university_visitor">University visitor</option>
                       <option value="researcher">Researcher</option>
                       <option value="alumni">Alumni</option>
-                      {bootstrapStatus?.needsSuperAdmin && (
+                      {bootstrapStatus?.needsSuperAdmin && bootstrapStatus.superAdminEmailConfigured && (
                         <option value="platform_admin">Platform Admin / Super Admin Setup</option>
                       )}
                       <option value="other">Other</option>
@@ -526,15 +544,10 @@ export function AuthModal() {
                       <span className="font-mono">SUPER_ADMIN_EMAIL</span> will initialize the Super Admin account.
                     </p>
                   ) : (
-                    <label className="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={claimSuperAdmin}
-                        onChange={(e) => setClaimSuperAdmin(e.target.checked)}
-                        className="mt-0.5"
-                      />
-                      <span>Initialize this first verified account as Platform Super Admin</span>
-                    </label>
+                    <p className="text-xs text-amber-700 dark:text-amber-400">
+                      {bootstrapStatus.configurationError ||
+                        'Super Admin setup is disabled until SUPER_ADMIN_EMAIL is configured in the server environment.'}
+                    </p>
                   )}
                 </div>
               )}
