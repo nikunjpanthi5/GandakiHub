@@ -639,7 +639,7 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       // Authorized signed URL endpoint works
       const signed = await req(`/api/academic/resources/${resourceId}/signed-url`, { cookie: studentCookie });
       expect(signed.status).toBe(200);
-      expect(signed.data.signed_url).toContain('https://');
+      expect(signed.data.url).toContain('https://');
 
       // Moderator cannot self-approve their own uploaded PDF
       const modPdf = buildSamplePdfBuffer('Moderator PDF Self Approval Test', '2026', ['Self approval check']);
@@ -673,14 +673,20 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
         formData: revFd,
       });
       expect(revRes.status).toBe(200);
-      expect(revRes.data.has_pending_revision).toBe(true);
+      expect(revRes.data.ok).toBe(true);
 
       const listWhilePending = await req(`/api/academic/resources?subject_id=${bitSem1Subj1Id}`);
-      const item = (listWhilePending.data.resources as Array<{ id: string; revision_number: number; status: string }>).find(
-        (r) => r.id === resourceId
-      );
+      const item = (
+        listWhilePending.data.resources as Array<{
+          id: string;
+          revision_number: number;
+          status: string;
+          has_pending_revision: boolean;
+        }>
+      ).find((r) => r.id === resourceId);
       expect(item?.status).toBe('approved');
       expect(item?.revision_number).toBe(1);
+      expect(item?.has_pending_revision).toBe(true);
 
       // Non-uploader student cannot edit resource
       const editDeny = await req(`/api/academic/resources/${resourceId}`, {

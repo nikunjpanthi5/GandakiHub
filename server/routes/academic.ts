@@ -877,7 +877,7 @@ export function createAcademicRouter(db: AppDatabase): Router {
     try {
       const resolved = await resolveAuthorizedRevision(req);
       if ('error' in resolved) {
-        return res.status(resolved.errorStatus).json({ error: resolved.error });
+        return res.status(resolved.errorStatus ?? 400).json({ error: resolved.error });
       }
       const { resource, rev } = resolved;
       const filename = sanitizeFilename(String(rev.original_filename));
@@ -910,7 +910,7 @@ export function createAcademicRouter(db: AppDatabase): Router {
     try {
       const resolved = await resolveAuthorizedRevision(req);
       if ('error' in resolved) {
-        return res.status(resolved.errorStatus).json({ error: resolved.error });
+        return res.status(resolved.errorStatus ?? 400).json({ error: resolved.error });
       }
       const { resource, rev } = resolved;
       const filename = sanitizeFilename(String(rev.original_filename));

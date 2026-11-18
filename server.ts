@@ -17,7 +17,10 @@ async function startServer() {
   const storage = initStorage();
 
   const app = createApiApp(db, storage);
-  const port = Number(process.env.PORT || 3000);
+  const envPort = Number(process.env.PORT);
+  const nginxPort = Number(process.env.NGINX_PORT);
+  const defaultAppPort = Number(process.env.DEFAULT_APP_PORT || 3000);
+  const port = nginxPort && envPort === nginxPort ? defaultAppPort : envPort || 3000;
   const isProd = process.env.NODE_ENV === 'production';
   const distDir = path.resolve(process.cwd(), 'dist');
   const hasFrontendDist = fs.existsSync(path.join(distDir, 'index.html'));
