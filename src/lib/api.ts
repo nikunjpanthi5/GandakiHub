@@ -51,7 +51,22 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export const API_BASE_URL = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+function resolveApiBaseUrl(): string {
+  const configured = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+  if (!configured || typeof window === 'undefined') return configured;
+  const host = window.location.hostname.toLowerCase();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host.endsWith('.run.app') ||
+    host.endsWith('.aistudio.google.com')
+  ) {
+    return '';
+  }
+  return configured;
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 export function resolveApiUrl(path: string): string {
   if (!path) return path;

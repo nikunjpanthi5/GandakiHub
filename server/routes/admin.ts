@@ -7,7 +7,7 @@ import {
   requireModerator,
   requireSuperAdmin,
 } from '../authMiddleware.ts';
-import { type AppDatabase, createNotification, writeAuditLog } from '../db.ts';
+import { type AppDatabase, createNotification, syncModerationQueue, writeAuditLog } from '../db.ts';
 import { normalizeDictionaryTerm } from '../profanity.ts';
 import { hashPassword, isUuid } from '../security.ts';
 import type { UserRole } from '../../src/types/index.ts';
@@ -83,6 +83,31 @@ export function createAdminRouter(db: AppDatabase): Router {
         ),
       ]);
 
+      let pending_staff_verifications = 0;
+      let pendingStaffVerifications: Array<Record<string, unknown>> = [];
+      try {
+        const svExists = await db.queryOne<{ exists: string | null }>(
+          "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+        );
+        if (svExists?.exists) {
+          pending_staff_verifications = await countQuery(
+            "SELECT COUNT(*) AS cnt FROM staff_verification_requests WHERE status = 'pending'"
+          );
+          pendingStaffVerifications = await db.query(
+            `SELECT sv.id, sv.user_id, sv.position, sv.department, sv.designation, sv.university_email,
+                    sv.supporting_notes, (sv.evidence_object_path IS NOT NULL) AS has_evidence,
+                    sv.evidence_original_filename, sv.status, sv.review_notes, sv.created_at,
+                    u.display_name AS requester_name, u.username AS requester_username, u.role AS requester_role
+             FROM staff_verification_requests sv
+             JOIN profiles u ON u.id = sv.user_id
+             WHERE sv.status = 'pending'
+             ORDER BY sv.created_at ASC`
+          );
+        }
+      } catch {
+        // Ignore if 003 migration not yet applied in prod
+      }
+
       return res.json({
         stats: {
           total_users,
@@ -96,6 +121,7 @@ export function createAdminRouter(db: AppDatabase): Router {
           pending_confessions,
           pending_complaints,
           open_reports,
+          pending_staff_verifications,
         },
         queues: {
           pendingResources,
@@ -103,6 +129,7 @@ export function createAdminRouter(db: AppDatabase): Router {
           pendingOpportunities,
           pendingDonations,
           openReports,
+          pendingStaffVerifications,
         },
       });
     } catch (err) {
@@ -474,6 +501,186 @@ export function createAdminRouter(db: AppDatabase): Router {
       );
       await writeAuditLog(db, req.user!.id, 'update_platform_setting', 'platform_settings', key, { value });
       return res.json({ ok: true });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  // Staff / Faculty Verification Requests (Admin & Super Admin)
+  router.get('/staff-verification', requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const svExists = await db.queryOne<{ exists: string | null }>(
+        "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+      );
+      if (!svExists?.exists) {
+        return res.json({ requests: [] });
+      }
+
+      const statusFilter = req.query.status ? String(req.query.status) : '';
+      const validStatus = ['pending', 'approved', 'rejected'].includes(statusFilter);
+      const rows = await db.query<Record<string, unknown>>(
+        `SELECT sv.id, sv.user_id, sv.position, sv.department, sv.designation, sv.university_email,
+                sv.supporting_notes, (sv.evidence_object_path IS NOT NULL) AS has_evidence,
+                sv.evidence_original_filename, sv.status, sv.reviewer_id, sv.review_notes,
+                sv.reviewed_at, sv.created_at, sv.updated_at,
+                u.display_name AS requester_name, u.username AS requester_username,
+                u.role AS requester_role, uc.email AS requester_email
+         FROM staff_verification_requests sv
+         JOIN profiles u ON u.id = sv.user_id
+         JOIN user_credentials uc ON uc.user_id = u.id
+         ${validStatus ? 'WHERE sv.status = $1' : ''}
+         ORDER BY CASE WHEN sv.status = 'pending' THEN 0 ELSE 1 END, sv.created_at DESC
+         LIMIT 100`,
+        validStatus ? [statusFilter] : []
+      );
+
+      return res.json({
+        requests: rows.map((r) => ({
+          ...r,
+          has_evidence: Boolean(r.has_evidence),
+          reviewed_at: r.reviewed_at ? new Date(String(r.reviewed_at)).toISOString() : null,
+          created_at: new Date(String(r.created_at)).toISOString(),
+          updated_at: new Date(String(r.updated_at)).toISOString(),
+        })),
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  router.get('/staff-verification/:id/evidence', requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Verification request not found.' });
+      const row = await db.queryOne<{
+        evidence_object_path: string | null;
+        evidence_original_filename: string | null;
+        evidence_mime_type: string | null;
+      }>(
+        'SELECT evidence_object_path, evidence_original_filename, evidence_mime_type FROM staff_verification_requests WHERE id = $1',
+        [req.params.id]
+      );
+      if (!row || !row.evidence_object_path) {
+        return res.status(404).json({ error: 'No supporting document attached to this request.' });
+      }
+      const data = await req.storage!.downloadPrivate(String(row.evidence_object_path));
+      if (!data) {
+        return res.status(404).json({ error: 'Supporting document not found in private storage.' });
+      }
+
+      res.setHeader('Content-Type', row.evidence_mime_type || 'application/octet-stream');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader(
+        'Content-Disposition',
+        `inline; filename="${row.evidence_original_filename || 'evidence'}"`
+      );
+      return res.send(data);
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  router.post('/staff-verification/:id/review', requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Verification request not found.' });
+      const parsed = z
+        .object({
+          decision: z.enum(['approved', 'rejected']),
+          review_notes: z.string().trim().max(500).default(''),
+        })
+        .safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: 'Invalid review decision.' });
+
+      const reqRow = await db.queryOne<{
+        id: string;
+        user_id: string;
+        position: string;
+        department: string;
+        designation: string;
+        status: string;
+      }>('SELECT id, user_id, position, department, designation, status FROM staff_verification_requests WHERE id = $1', [
+        req.params.id,
+      ]);
+
+      if (!reqRow) return res.status(404).json({ error: 'Verification request not found.' });
+      if (reqRow.status !== 'pending') {
+        return res.status(409).json({ error: `This verification request has already been ${reqRow.status}.` });
+      }
+      if (String(reqRow.user_id) === req.user!.id) {
+        return res.status(403).json({ error: 'Administrators cannot approve their own verification request.' });
+      }
+
+      await db.transaction(
+        async (tx) => {
+          await tx.execute(
+            `UPDATE staff_verification_requests
+             SET status = $1,
+                 reviewer_id = $2,
+                 review_notes = $3,
+                 reviewed_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = $4`,
+            [parsed.data.decision, req.user!.id, parsed.data.review_notes || null, reqRow.id]
+          );
+
+          if (parsed.data.decision === 'approved') {
+            await tx.execute(
+              `UPDATE profiles
+               SET role = 'verified_teacher',
+                   staff_position = $1,
+                   department = $2,
+                   designation = $3,
+                   profile_completed = TRUE,
+                   updated_at = NOW()
+               WHERE id = $4`,
+              [reqRow.position, reqRow.department, reqRow.designation || null, reqRow.user_id]
+            );
+            await tx.execute(
+              `INSERT INTO user_roles (id, user_id, role, granted_by, reason, created_at)
+               VALUES ($1, $2, 'verified_teacher', $3, $4, NOW())`,
+              [
+                crypto.randomUUID(),
+                reqRow.user_id,
+                req.user!.id,
+                `University staff verification approved (${reqRow.position} · ${reqRow.department})`,
+              ]
+            );
+          }
+
+          await syncModerationQueue(
+            tx,
+            'staff_verification',
+            reqRow.id,
+            reqRow.user_id,
+            parsed.data.decision,
+            req.user!.id,
+            parsed.data.review_notes || null
+          );
+
+          await writeAuditLog(tx, req.user!.id, `staff_verification_${parsed.data.decision}`, 'staff_verification', reqRow.id, {
+            target_user_id: reqRow.user_id,
+            position: reqRow.position,
+            department: reqRow.department,
+            review_notes: parsed.data.review_notes,
+          });
+
+          await createNotification(
+            tx,
+            reqRow.user_id,
+            'staff_verification_update',
+            parsed.data.decision === 'approved'
+              ? 'University Staff Verification Approved'
+              : 'University Staff Verification Update',
+            parsed.data.decision === 'approved'
+              ? `Your verification request (${reqRow.position} · ${reqRow.department}) has been approved.`
+              : `Your university staff verification request was declined.${parsed.data.review_notes ? ` Note: ${parsed.data.review_notes}` : ''}`,
+            '/profile'
+          );
+        },
+        { trustedServer: true, actorId: req.user!.id }
+      );
+
+      return res.json({ ok: true, status: parsed.data.decision });
     } catch (err) {
       return next(err);
     }

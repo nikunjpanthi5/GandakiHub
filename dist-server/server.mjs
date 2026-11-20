@@ -152,6 +152,41 @@ async function getAuthUserFromDb(db, userId) {
     "SELECT community_id FROM community_moderators WHERE user_id = $1",
     [userId]
   );
+  let staffVerificationStatus = row.role === "verified_teacher" ? "approved" : "not_requested";
+  try {
+    const tableCheck = await db.queryOne(
+      "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+    );
+    if (tableCheck?.exists) {
+      const latestReq = await db.queryOne(
+        `SELECT status FROM staff_verification_requests
+         WHERE user_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId]
+      );
+      if (row.role === "verified_teacher") {
+        staffVerificationStatus = "approved";
+      } else if (latestReq?.status === "pending" || latestReq?.status === "approved" || latestReq?.status === "rejected") {
+        staffVerificationStatus = latestReq.status;
+      }
+    }
+  } catch {
+  }
+  const role = row.role;
+  const hasAcademic = Boolean(row.program_id && row.semester_id);
+  const hasStaffInfo = Boolean(row.staff_position && row.department);
+  const hasBio = Boolean(String(row.bio || "").trim().length > 0);
+  const hasAvatar = Boolean(row.avatar_url);
+  const hasInterests = Array.isArray(row.interests) && row.interests.length > 0;
+  const hasDeptOrId = Boolean(row.department || row.student_id);
+  let completionPct = 25;
+  if (hasAcademic || hasStaffInfo) completionPct += 35;
+  else if (row.program_id || hasDeptOrId) completionPct += 15;
+  if (hasBio) completionPct += 15;
+  if (hasInterests) completionPct += 15;
+  if (hasAvatar) completionPct += 10;
+  completionPct = Math.min(100, completionPct);
+  const profileCompleted = Boolean(row.profile_completed) || hasAcademic || hasStaffInfo || role === "super_admin" || role === "admin" || role === "verified_teacher";
   return {
     id: String(row.id),
     email: String(row.email),
@@ -159,7 +194,7 @@ async function getAuthUserFromDb(db, userId) {
     display_name: String(row.display_name),
     avatar_url: row.avatar_url ? String(row.avatar_url) : null,
     bio: String(row.bio || ""),
-    role: row.role,
+    role,
     email_verified: Boolean(row.email_verified),
     university_email_verified: Boolean(row.university_email_verified),
     external_reason: row.external_reason || null,
@@ -168,6 +203,13 @@ async function getAuthUserFromDb(db, userId) {
     program_name: row.program_name ? String(row.program_name) : null,
     semester_id: row.semester_id ? String(row.semester_id) : null,
     semester_name: row.semester_name ? String(row.semester_name) : null,
+    department: row.department ? String(row.department) : null,
+    student_id: row.student_id ? String(row.student_id) : null,
+    staff_position: row.staff_position ? String(row.staff_position) : null,
+    designation: row.designation ? String(row.designation) : null,
+    profile_completed: profileCompleted,
+    profile_completion_pct: completionPct,
+    staff_verification_status: staffVerificationStatus,
     interests: Array.isArray(row.interests) ? row.interests : [],
     notification_prefs: row.notification_prefs || {
       replies: true,
@@ -458,11 +500,17 @@ async function initDatabase() {
   const pgDataDir = process.env.LOCAL_PGDATA_DIR || path.resolve(process.cwd(), "data", "pgdata");
   fs.mkdirSync(path.dirname(pgDataDir), { recursive: true });
   const pglite = new PGlite(pgDataDir, { extensions: { pg_trgm } });
-  const migrationSql = fs.readFileSync(
-    path.resolve(process.cwd(), "supabase", "migrations", "002_complete_production_schema.sql"),
-    "utf8"
-  );
-  await pglite.exec(migrationSql);
+  const migrationFiles = [
+    "002_complete_production_schema.sql",
+    "003_profile_completion_staff_verification.sql"
+  ];
+  for (const file of migrationFiles) {
+    const filePath = path.resolve(process.cwd(), "supabase", "migrations", file);
+    if (fs.existsSync(filePath)) {
+      const migrationSql = fs.readFileSync(filePath, "utf8");
+      await pglite.exec(migrationSql);
+    }
+  }
   const db = createPGliteDatabase(pglite);
   cachedDb = db;
   return db;
@@ -1534,6 +1582,29 @@ function createAdminRouter(db) {
            ORDER BY CASE WHEN rp.status = 'open' THEN 0 ELSE 1 END, rp.created_at DESC LIMIT 50`
         )
       ]);
+      let pending_staff_verifications = 0;
+      let pendingStaffVerifications = [];
+      try {
+        const svExists = await db.queryOne(
+          "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+        );
+        if (svExists?.exists) {
+          pending_staff_verifications = await countQuery(
+            "SELECT COUNT(*) AS cnt FROM staff_verification_requests WHERE status = 'pending'"
+          );
+          pendingStaffVerifications = await db.query(
+            `SELECT sv.id, sv.user_id, sv.position, sv.department, sv.designation, sv.university_email,
+                    sv.supporting_notes, (sv.evidence_object_path IS NOT NULL) AS has_evidence,
+                    sv.evidence_original_filename, sv.status, sv.review_notes, sv.created_at,
+                    u.display_name AS requester_name, u.username AS requester_username, u.role AS requester_role
+             FROM staff_verification_requests sv
+             JOIN profiles u ON u.id = sv.user_id
+             WHERE sv.status = 'pending'
+             ORDER BY sv.created_at ASC`
+          );
+        }
+      } catch {
+      }
       return res.json({
         stats: {
           total_users,
@@ -1546,14 +1617,16 @@ function createAdminRouter(db) {
           pending_resources: pending_resources_new + pending_resources_revs,
           pending_confessions,
           pending_complaints,
-          open_reports
+          open_reports,
+          pending_staff_verifications
         },
         queues: {
           pendingResources,
           pendingConfessions,
           pendingOpportunities,
           pendingDonations,
-          openReports
+          openReports,
+          pendingStaffVerifications
         }
       });
     } catch (err) {
@@ -1866,6 +1939,154 @@ function createAdminRouter(db) {
       return next(err);
     }
   });
+  router.get("/staff-verification", requireAdmin, async (req, res, next) => {
+    try {
+      const svExists = await db.queryOne(
+        "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+      );
+      if (!svExists?.exists) {
+        return res.json({ requests: [] });
+      }
+      const statusFilter = req.query.status ? String(req.query.status) : "";
+      const validStatus = ["pending", "approved", "rejected"].includes(statusFilter);
+      const rows = await db.query(
+        `SELECT sv.id, sv.user_id, sv.position, sv.department, sv.designation, sv.university_email,
+                sv.supporting_notes, (sv.evidence_object_path IS NOT NULL) AS has_evidence,
+                sv.evidence_original_filename, sv.status, sv.reviewer_id, sv.review_notes,
+                sv.reviewed_at, sv.created_at, sv.updated_at,
+                u.display_name AS requester_name, u.username AS requester_username,
+                u.role AS requester_role, uc.email AS requester_email
+         FROM staff_verification_requests sv
+         JOIN profiles u ON u.id = sv.user_id
+         JOIN user_credentials uc ON uc.user_id = u.id
+         ${validStatus ? "WHERE sv.status = $1" : ""}
+         ORDER BY CASE WHEN sv.status = 'pending' THEN 0 ELSE 1 END, sv.created_at DESC
+         LIMIT 100`,
+        validStatus ? [statusFilter] : []
+      );
+      return res.json({
+        requests: rows.map((r) => ({
+          ...r,
+          has_evidence: Boolean(r.has_evidence),
+          reviewed_at: r.reviewed_at ? new Date(String(r.reviewed_at)).toISOString() : null,
+          created_at: new Date(String(r.created_at)).toISOString(),
+          updated_at: new Date(String(r.updated_at)).toISOString()
+        }))
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+  router.get("/staff-verification/:id/evidence", requireAdmin, async (req, res, next) => {
+    try {
+      if (!isUuid(req.params.id)) return res.status(404).json({ error: "Verification request not found." });
+      const row = await db.queryOne(
+        "SELECT evidence_object_path, evidence_original_filename, evidence_mime_type FROM staff_verification_requests WHERE id = $1",
+        [req.params.id]
+      );
+      if (!row || !row.evidence_object_path) {
+        return res.status(404).json({ error: "No supporting document attached to this request." });
+      }
+      const data = await req.storage.downloadPrivate(String(row.evidence_object_path));
+      if (!data) {
+        return res.status(404).json({ error: "Supporting document not found in private storage." });
+      }
+      res.setHeader("Content-Type", row.evidence_mime_type || "application/octet-stream");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${row.evidence_original_filename || "evidence"}"`
+      );
+      return res.send(data);
+    } catch (err) {
+      return next(err);
+    }
+  });
+  router.post("/staff-verification/:id/review", requireAdmin, async (req, res, next) => {
+    try {
+      if (!isUuid(req.params.id)) return res.status(404).json({ error: "Verification request not found." });
+      const parsed = z2.object({
+        decision: z2.enum(["approved", "rejected"]),
+        review_notes: z2.string().trim().max(500).default("")
+      }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Invalid review decision." });
+      const reqRow = await db.queryOne("SELECT id, user_id, position, department, designation, status FROM staff_verification_requests WHERE id = $1", [
+        req.params.id
+      ]);
+      if (!reqRow) return res.status(404).json({ error: "Verification request not found." });
+      if (reqRow.status !== "pending") {
+        return res.status(409).json({ error: `This verification request has already been ${reqRow.status}.` });
+      }
+      if (String(reqRow.user_id) === req.user.id) {
+        return res.status(403).json({ error: "Administrators cannot approve their own verification request." });
+      }
+      await db.transaction(
+        async (tx) => {
+          await tx.execute(
+            `UPDATE staff_verification_requests
+             SET status = $1,
+                 reviewer_id = $2,
+                 review_notes = $3,
+                 reviewed_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = $4`,
+            [parsed.data.decision, req.user.id, parsed.data.review_notes || null, reqRow.id]
+          );
+          if (parsed.data.decision === "approved") {
+            await tx.execute(
+              `UPDATE profiles
+               SET role = 'verified_teacher',
+                   staff_position = $1,
+                   department = $2,
+                   designation = $3,
+                   profile_completed = TRUE,
+                   updated_at = NOW()
+               WHERE id = $4`,
+              [reqRow.position, reqRow.department, reqRow.designation || null, reqRow.user_id]
+            );
+            await tx.execute(
+              `INSERT INTO user_roles (id, user_id, role, granted_by, reason, created_at)
+               VALUES ($1, $2, 'verified_teacher', $3, $4, NOW())`,
+              [
+                crypto5.randomUUID(),
+                reqRow.user_id,
+                req.user.id,
+                `University staff verification approved (${reqRow.position} \xB7 ${reqRow.department})`
+              ]
+            );
+          }
+          await syncModerationQueue(
+            tx,
+            "staff_verification",
+            reqRow.id,
+            reqRow.user_id,
+            parsed.data.decision,
+            req.user.id,
+            parsed.data.review_notes || null
+          );
+          await writeAuditLog(tx, req.user.id, `staff_verification_${parsed.data.decision}`, "staff_verification", reqRow.id, {
+            target_user_id: reqRow.user_id,
+            position: reqRow.position,
+            department: reqRow.department,
+            review_notes: parsed.data.review_notes
+          });
+          await createNotification(
+            tx,
+            reqRow.user_id,
+            "staff_verification_update",
+            parsed.data.decision === "approved" ? "University Staff Verification Approved" : "University Staff Verification Update",
+            parsed.data.decision === "approved" ? `Your verification request (${reqRow.position} \xB7 ${reqRow.department}) has been approved.` : `Your university staff verification request was declined.${parsed.data.review_notes ? ` Note: ${parsed.data.review_notes}` : ""}`,
+            "/profile"
+          );
+        },
+        { trustedServer: true, actorId: req.user.id }
+      );
+      return res.json({ ok: true, status: parsed.data.decision });
+    } catch (err) {
+      return next(err);
+    }
+  });
   return router;
 }
 
@@ -1959,18 +2180,28 @@ async function dispatchOtpEmail(email, code, purpose) {
 }
 
 // server/routes/auth.ts
+var STAFF_POSITIONS = [
+  "Teacher",
+  "Faculty",
+  "Staff",
+  "Lecturer",
+  "Assistant Professor",
+  "Associate Professor",
+  "Professor",
+  "Administrative Staff",
+  "Other"
+];
 var registerSchema = z3.object({
-  email: z3.string().email().max(160),
+  full_name: z3.string().trim().min(2, "Full name must be at least 2 characters").max(80).optional(),
+  display_name: z3.string().trim().min(2, "Full name must be at least 2 characters").max(80).optional(),
+  email: z3.string().trim().email("Please enter a valid email address").max(160),
   password: z3.string().min(8, "Password must be at least 8 characters").max(128).regex(/[A-Za-z]/, "Password must include a letter").regex(/[0-9]/, "Password must include a number"),
-  username: z3.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, "Username may contain letters, numbers, and underscores only"),
-  display_name: z3.string().min(2).max(80),
-  category: z3.enum(["university_member", "external"]),
-  member_type: z3.enum(["student", "teacher"]).optional(),
-  program_id: z3.string().nullable().optional(),
-  semester_id: z3.string().nullable().optional(),
-  external_reason: z3.enum(["future_student", "parent_guardian", "university_visitor", "researcher", "alumni", "platform_admin", "other"]).nullable().optional(),
-  external_reason_detail: z3.string().max(400).nullable().optional(),
-  claim_super_admin: z3.boolean().optional()
+  confirm_password: z3.string().min(1, "Please confirm your password")
+}).refine((d) => Boolean((d.full_name || d.display_name || "").trim().length >= 2), {
+  message: "Full name is required (at least 2 characters)."
+}).refine((d) => d.password === d.confirm_password, {
+  message: "Password and Confirm Password do not match.",
+  path: ["confirm_password"]
 });
 var verifyOtpSchema = z3.object({
   email: z3.string().email(),
@@ -1980,16 +2211,18 @@ var verifyOtpSchema = z3.object({
 var loginSchema = z3.object({
   identifier: z3.string().min(1).max(160).optional(),
   email: z3.string().min(1).max(160).optional(),
-  password: z3.string().min(1)
+  password: z3.string().min(1, "Password is required.")
 }).refine((d) => Boolean((d.identifier || d.email || "").trim()), {
-  message: "Email or username is required."
+  message: "Email is required."
 });
 var profileUpdateSchema = z3.object({
-  display_name: z3.string().min(2).max(80).optional(),
+  display_name: z3.string().trim().min(2).max(80).optional(),
   bio: z3.string().max(500).optional(),
   program_id: z3.string().nullable().optional(),
   semester_id: z3.string().nullable().optional(),
-  interests: z3.array(z3.string().max(40)).max(12).optional(),
+  department: z3.string().trim().max(120).nullable().optional(),
+  student_id: z3.string().trim().max(60).nullable().optional(),
+  interests: z3.array(z3.string().trim().max(40)).max(12).optional(),
   notification_prefs: z3.object({
     replies: z3.boolean(),
     connections: z3.boolean(),
@@ -2006,33 +2239,47 @@ function getConfiguredSuperAdminEmail() {
   const val = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
   return val && val.includes("@") ? val : null;
 }
+async function generateUniqueUsername(tx, fullName, email) {
+  const fromName = fullName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 20);
+  const fromEmail = email.split("@")[0].toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 20);
+  const base = (fromName.length >= 3 ? fromName : fromEmail.length >= 3 ? fromEmail : "gandaki_member").slice(0, 22);
+  const exact = await tx.queryOne("SELECT id FROM profiles WHERE lower(username) = $1", [base]);
+  if (!exact) return base;
+  for (let i = 0; i < 12; i++) {
+    const suffix = crypto6.randomBytes(2).toString("hex");
+    const candidate = `${base.slice(0, 24)}_${suffix}`;
+    const taken = await tx.queryOne("SELECT id FROM profiles WHERE lower(username) = $1", [candidate]);
+    if (!taken) return candidate;
+  }
+  return `member_${crypto6.randomBytes(4).toString("hex")}`;
+}
+async function hasMigration003ProfileCols(db) {
+  const row = await db.queryOne(
+    `SELECT column_name::text AS exists
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'department'
+     LIMIT 1`
+  );
+  return Boolean(row?.exists);
+}
+async function hasStaffVerificationTable(db) {
+  const row = await db.queryOne(
+    "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+  );
+  return Boolean(row?.exists);
+}
 function createAuthRouter(db) {
   const router = Router3();
   const avatarUpload = multer2({
     storage: multer2.memoryStorage(),
     limits: { fileSize: 2 * 1024 * 1024 }
   });
+  const evidenceUpload = multer2({
+    storage: multer2.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }
+  });
   router.get("/me", (req, res) => {
     res.json({ user: req.user ?? null });
-  });
-  router.get("/bootstrap-status", async (_req, res, next) => {
-    try {
-      const superRow = await db.queryOne(
-        "SELECT COUNT(*) AS cnt FROM profiles WHERE role = 'super_admin' AND email_verified = TRUE"
-      );
-      const initSetting = await db.queryOne(
-        "SELECT value FROM platform_settings WHERE key = 'super_admin_initialized'"
-      );
-      const needsSuperAdmin = Number(superRow?.cnt || 0) === 0 && initSetting?.value !== "true";
-      const superAdminEmailConfigured = Boolean(getConfiguredSuperAdminEmail());
-      res.json({
-        needsSuperAdmin,
-        superAdminEmailConfigured,
-        configurationError: needsSuperAdmin && !superAdminEmailConfigured ? "SUPER_ADMIN_EMAIL is not configured on the server. First-time Super Admin bootstrap requires SUPER_ADMIN_EMAIL to be set." : null
-      });
-    } catch (err) {
-      next(err);
-    }
   });
   router.post("/register", async (req, res, next) => {
     try {
@@ -2046,14 +2293,9 @@ function createAuthRouter(db) {
         return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid registration data." });
       }
       const data = parsed.data;
+      const fullName = (data.full_name || data.display_name || "").trim();
       const normalizedEmail = data.email.trim().toLowerCase();
-      const normalizedUsername = data.username.trim().toLowerCase();
       const envSuperEmail = getConfiguredSuperAdminEmail();
-      if (data.category === "university_member" && !isUniversityEmail(normalizedEmail)) {
-        return res.status(400).json({
-          error: "University members must register with a @gandakiuniversity.edu.np email address."
-        });
-      }
       const superRow = await db.queryOne(
         "SELECT COUNT(*) AS cnt FROM profiles WHERE role = 'super_admin' AND email_verified = TRUE"
       );
@@ -2061,34 +2303,12 @@ function createAuthRouter(db) {
         "SELECT value FROM platform_settings WHERE key = 'super_admin_initialized'"
       );
       const superAlreadyInitialized = Number(superRow?.cnt || 0) > 0 || initSetting?.value === "true";
-      const wantsSuperAdmin = Boolean(data.claim_super_admin) || data.external_reason === "platform_admin";
-      if (wantsSuperAdmin) {
-        if (!envSuperEmail) {
-          return res.status(503).json({
-            error: "SUPER_ADMIN_EMAIL is not configured on the server. Super Admin setup cannot proceed."
-          });
-        }
-        if (superAlreadyInitialized) {
-          return res.status(403).json({
-            error: "A Super Admin account already exists. Ask the Super Admin to assign administrator roles."
-          });
-        }
-        if (envSuperEmail !== normalizedEmail) {
-          return res.status(403).json({
-            error: "Only the configured SUPER_ADMIN_EMAIL address can complete initial Super Admin setup."
-          });
-        }
+      const isBootstrapSuperEmail = !superAlreadyInitialized && Boolean(envSuperEmail && envSuperEmail === normalizedEmail);
+      if (!isUniversityEmail(normalizedEmail) && !isBootstrapSuperEmail) {
+        return res.status(400).json({
+          error: "Registration requires a valid @gandakiuniversity.edu.np email address."
+        });
       }
-      if (data.category === "external") {
-        if (!data.external_reason) {
-          return res.status(400).json({ error: "Please select your reason for joining GandakiHub." });
-        }
-        if (data.external_reason === "other" && (!data.external_reason_detail || data.external_reason_detail.trim().length < 5)) {
-          return res.status(400).json({ error: 'Please provide a brief explanation when selecting "Other".' });
-        }
-      }
-      const cleanProgramId = data.category === "university_member" && isUuid(data.program_id) ? data.program_id : null;
-      const cleanSemesterId = data.category === "university_member" && isUuid(data.semester_id) ? data.semester_id : null;
       const existingByEmail = await db.queryOne(
         `SELECT uc.user_id, p.email_verified
          FROM user_credentials uc
@@ -2108,47 +2328,20 @@ function createAuthRouter(db) {
           error: "An account with this email address already exists. One email can only have one account."
         });
       }
-      const existingByUsername = await db.queryOne(
-        "SELECT id FROM profiles WHERE lower(username) = $1",
-        [normalizedUsername]
-      );
-      if (existingByUsername) {
-        return res.status(409).json({ error: "This username is already taken." });
-      }
-      let initialRole = "visitor";
-      if (data.category === "external") {
-        if (data.external_reason === "future_student") initialRole = "future_student";
-        else if (data.external_reason === "alumni") initialRole = "alumni";
-        else initialRole = "visitor";
-      }
+      const initialRole = "visitor";
       const userId = crypto6.randomUUID();
       const passHash = hashPassword(data.password);
       const otp = generateSixDigitOtp();
       const resendAfter = new Date(Date.now() + 60 * 1e3).toISOString();
       const expiresAt = new Date(Date.now() + 15 * 60 * 1e3).toISOString();
-      const canClaimSuperAdmin = !superAlreadyInitialized && Boolean(envSuperEmail && envSuperEmail === normalizedEmail);
-      let pendingDetail = data.category === "external" ? data.external_reason_detail?.trim() ?? null : null;
-      if (canClaimSuperAdmin) {
-        pendingDetail = "pending_super_admin_claim";
-      } else if (data.category === "university_member" && data.member_type === "teacher") {
-        pendingDetail = "pending_teacher_verification";
-      }
       try {
         await db.transaction(
           async (tx) => {
+            const generatedUsername = await generateUniqueUsername(tx, fullName, normalizedEmail);
             await tx.execute(
-              `INSERT INTO profiles (id, username, display_name, bio, role, email_verified, university_email_verified, external_reason, external_reason_detail, program_id, semester_id, interests, account_status, created_at, updated_at)
-               VALUES ($1, $2, $3, '', $4::user_role, FALSE, FALSE, $5, $6, $7, $8, '{}', 'active', NOW(), NOW())`,
-              [
-                userId,
-                normalizedUsername,
-                data.display_name.trim(),
-                initialRole,
-                data.category === "external" ? data.external_reason ?? null : null,
-                pendingDetail,
-                cleanProgramId,
-                cleanSemesterId
-              ]
+              `INSERT INTO profiles (id, username, display_name, bio, role, email_verified, university_email_verified, interests, account_status, created_at, updated_at)
+               VALUES ($1, $2, $3, '', $4::user_role, FALSE, FALSE, '{}', 'active', NOW(), NOW())`,
+              [userId, generatedUsername, fullName, initialRole]
             );
             await tx.execute(
               `INSERT INTO user_credentials (user_id, email, password_hash, created_at, updated_at)
@@ -2166,8 +2359,7 @@ function createAuthRouter(db) {
               [crypto6.randomUUID(), normalizedEmail, hashToken(otp), resendAfter, expiresAt]
             );
             await writeAuditLog(tx, userId, "user_registered", "user", userId, {
-              category: data.category,
-              intended_member_type: data.member_type || "student"
+              registration_mode: "simplified_unified"
             });
           },
           { trustedServer: true }
@@ -2176,7 +2368,7 @@ function createAuthRouter(db) {
         const msg = err instanceof Error ? err.message : "";
         if (msg.toLowerCase().includes("unique")) {
           return res.status(409).json({
-            error: "An account with this email address or username already exists."
+            error: "An account with this email address already exists."
           });
         }
         throw err;
@@ -2265,7 +2457,7 @@ function createAuthRouter(db) {
                ON CONFLICT (key) DO UPDATE SET value = 'true'`
             );
           } else if (isUni) {
-            assignedRole = userRow.external_reason_detail === "pending_teacher_verification" ? "verified_teacher" : "verified_student";
+            assignedRole = "verified_student";
             cleanDetail = null;
           } else if (cleanDetail === "pending_super_admin_claim") {
             cleanDetail = null;
@@ -2446,7 +2638,7 @@ function createAuthRouter(db) {
   router.post("/login", async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: "Email or username and password are required." });
+      if (!parsed.success) return res.status(400).json({ error: "Email and password are required." });
       const identifier = (parsed.data.identifier ?? parsed.data.email ?? "").trim().toLowerCase();
       const rl = await checkRateLimit(db, `login:${identifier}`, 12, 900);
       if (!rl.allowed) {
@@ -2460,7 +2652,7 @@ function createAuthRouter(db) {
         [identifier]
       );
       if (!row || !verifyPassword(parsed.data.password, String(row.password_hash))) {
-        return res.status(401).json({ error: "Invalid credentials." });
+        return res.status(401).json({ error: "Invalid email or password." });
       }
       if (row.account_status !== "active") {
         return res.status(403).json({ error: "Your account has been suspended. Contact campus moderation." });
@@ -2498,6 +2690,55 @@ function createAuthRouter(db) {
       return next(err);
     }
   });
+  router.post("/admin-login", async (req, res, next) => {
+    try {
+      const parsed = loginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Email and password are required." });
+      }
+      const identifier = (parsed.data.email ?? parsed.data.identifier ?? "").trim().toLowerCase();
+      const rl = await checkRateLimit(db, `admin_login:${req.ip || "local"}:${identifier}`, 10, 900);
+      if (!rl.allowed) {
+        return res.status(429).json({ error: `Too many login attempts. Retry in ${rl.retryAfterSec}s.` });
+      }
+      const row = await db.queryOne(
+        `SELECT p.id, uc.email, uc.password_hash, p.role, p.account_status, p.email_verified
+         FROM profiles p
+         JOIN user_credentials uc ON uc.user_id = p.id
+         WHERE lower(uc.email) = $1 OR lower(p.username) = $1`,
+        [identifier]
+      );
+      if (!row || !verifyPassword(parsed.data.password, String(row.password_hash))) {
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      if (row.role !== "admin" && row.role !== "super_admin") {
+        await writeAuditLog(db, String(row.id), "admin_portal_unauthorized_attempt", "user", String(row.id), {
+          role: row.role
+        });
+        return res.status(403).json({
+          error: "You are not authorized to access the administrator portal."
+        });
+      }
+      if (row.account_status !== "active") {
+        return res.status(403).json({ error: "This administrator account is currently suspended." });
+      }
+      if (!row.email_verified) {
+        return res.status(403).json({ error: "Administrator email verification is pending." });
+      }
+      const token = generateSessionToken();
+      await createSessionCookie(db, req, res, String(row.id), token);
+      await writeAuditLog(db, String(row.id), "admin_portal_login", "user", String(row.id), {
+        role: row.role
+      });
+      const user = await getAuthUserFromDb(db, String(row.id));
+      return res.json({
+        user,
+        sessionToken: token
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
   router.post("/logout", async (req, res, next) => {
     try {
       const authHeader = req.headers.authorization;
@@ -2522,30 +2763,80 @@ function createAuthRouter(db) {
       const d = parsed.data;
       const nextProgramId = d.program_id !== void 0 ? isUuid(d.program_id) ? d.program_id : null : u.program_id;
       const nextSemesterId = d.semester_id !== void 0 ? isUuid(d.semester_id) ? d.semester_id : null : u.semester_id;
+      if (nextProgramId) {
+        const progExists = await db.queryOne("SELECT id FROM programs WHERE id = $1 AND is_archived = FALSE", [nextProgramId]);
+        if (!progExists) {
+          return res.status(400).json({ error: "Selected academic program was not found." });
+        }
+      }
+      if (nextSemesterId) {
+        const semExists = await db.queryOne("SELECT id FROM semesters WHERE id = $1 AND is_archived = FALSE", [nextSemesterId]);
+        if (!semExists) {
+          return res.status(400).json({ error: "Selected semester was not found." });
+        }
+      }
+      const supportsExtendedCols = await hasMigration003ProfileCols(db);
+      const nextDept = d.department !== void 0 ? d.department?.trim() || null : u.department ?? null;
+      const nextStudentId = d.student_id !== void 0 ? d.student_id?.trim() || null : u.student_id ?? null;
+      const nextBio = d.bio !== void 0 ? d.bio.trim() : u.bio;
+      const willComplete = Boolean(
+        nextProgramId && nextSemesterId || nextDept && (nextStudentId || nextBio)
+      );
       const updated = await db.transaction(
         async (tx) => {
-          await tx.execute(
-            `UPDATE profiles SET
-              display_name = COALESCE($1, display_name),
-              bio = COALESCE($2, bio),
-              program_id = $3,
-              semester_id = $4,
-              interests = COALESCE($5::text[], interests),
-              notification_prefs = COALESCE($6::jsonb, notification_prefs),
-              privacy_settings = COALESCE($7::jsonb, privacy_settings),
-              updated_at = NOW()
-             WHERE id = $8`,
-            [
-              d.display_name?.trim() ?? null,
-              d.bio !== void 0 ? d.bio.trim() : null,
-              nextProgramId,
-              nextSemesterId,
-              d.interests ?? null,
-              d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-              d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
-              u.id
-            ]
-          );
+          if (supportsExtendedCols) {
+            await tx.execute(
+              `UPDATE profiles SET
+                display_name = COALESCE($1, display_name),
+                bio = COALESCE($2, bio),
+                program_id = $3,
+                semester_id = $4,
+                department = $5,
+                student_id = $6,
+                profile_completed = profile_completed OR $7,
+                interests = COALESCE($8::text[], interests),
+                notification_prefs = COALESCE($9::jsonb, notification_prefs),
+                privacy_settings = COALESCE($10::jsonb, privacy_settings),
+                updated_at = NOW()
+               WHERE id = $11`,
+              [
+                d.display_name?.trim() ?? null,
+                d.bio !== void 0 ? d.bio.trim() : null,
+                nextProgramId,
+                nextSemesterId,
+                nextDept,
+                nextStudentId,
+                willComplete,
+                d.interests ?? null,
+                d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
+                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                u.id
+              ]
+            );
+          } else {
+            await tx.execute(
+              `UPDATE profiles SET
+                display_name = COALESCE($1, display_name),
+                bio = COALESCE($2, bio),
+                program_id = $3,
+                semester_id = $4,
+                interests = COALESCE($5::text[], interests),
+                notification_prefs = COALESCE($6::jsonb, notification_prefs),
+                privacy_settings = COALESCE($7::jsonb, privacy_settings),
+                updated_at = NOW()
+               WHERE id = $8`,
+              [
+                d.display_name?.trim() ?? null,
+                d.bio !== void 0 ? d.bio.trim() : null,
+                nextProgramId,
+                nextSemesterId,
+                d.interests ?? null,
+                d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
+                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                u.id
+              ]
+            );
+          }
           return getAuthUserFromDb(tx, u.id);
         },
         { actorId: u.id, trustedServer: false }
@@ -2555,6 +2846,173 @@ function createAuthRouter(db) {
       return next(err);
     }
   });
+  router.get("/staff-verification", requireAuth, async (req, res, next) => {
+    try {
+      const tableReady = await hasStaffVerificationTable(db);
+      if (!tableReady) {
+        return res.json({
+          status: req.user.role === "verified_teacher" ? "approved" : "not_requested",
+          latestRequest: null
+        });
+      }
+      const row = await db.queryOne(
+        `SELECT id, user_id, position, department, designation, university_email, supporting_notes,
+                (evidence_object_path IS NOT NULL) AS has_evidence, evidence_original_filename,
+                status, reviewer_id, review_notes, reviewed_at, created_at, updated_at
+         FROM staff_verification_requests
+         WHERE user_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [req.user.id]
+      );
+      const status = req.user.role === "verified_teacher" ? "approved" : row ? String(row.status) : "not_requested";
+      const latestRequest = row ? {
+        ...row,
+        has_evidence: Boolean(row.has_evidence),
+        reviewed_at: row.reviewed_at ? new Date(String(row.reviewed_at)).toISOString() : null,
+        created_at: new Date(String(row.created_at)).toISOString(),
+        updated_at: new Date(String(row.updated_at)).toISOString()
+      } : null;
+      return res.json({
+        status,
+        latestRequest
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+  router.post(
+    "/staff-verification",
+    requireAuth,
+    evidenceUpload.single("evidence"),
+    async (req, res, next) => {
+      try {
+        const u = req.user;
+        if (u.role === "visitor" || u.role === "future_student") {
+          return res.status(403).json({
+            error: "Only verified university members can request university staff verification."
+          });
+        }
+        if (u.role === "verified_teacher" || u.role === "admin" || u.role === "super_admin") {
+          return res.status(400).json({
+            error: "Your account already holds verified staff or administrative privileges."
+          });
+        }
+        const tableReady = await hasStaffVerificationTable(db);
+        if (!tableReady) {
+          return res.status(503).json({
+            error: "Staff verification database migration (003) has not been applied yet."
+          });
+        }
+        const parsed = z3.object({
+          position: z3.enum(STAFF_POSITIONS),
+          department: z3.string().trim().min(2, "Department is required").max(120),
+          designation: z3.string().trim().max(120).default(""),
+          supporting_notes: z3.string().trim().max(1e3).default("")
+        }).safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: parsed.error.issues[0]?.message || "Please complete all required staff verification fields."
+          });
+        }
+        const existingPending = await db.queryOne(
+          "SELECT id FROM staff_verification_requests WHERE user_id = $1 AND status = 'pending'",
+          [u.id]
+        );
+        if (existingPending) {
+          return res.status(409).json({
+            error: "You already have a pending university staff verification request awaiting review."
+          });
+        }
+        let evidencePath = null;
+        let evidenceOrigName = null;
+        let evidenceMime = null;
+        if (req.file) {
+          const buf = req.file.buffer;
+          const isPng = buf.subarray(0, 8).toString("hex") === "89504e470d0a1a0a";
+          const isJpg = buf.subarray(0, 3).toString("hex") === "ffd8ff";
+          const pdfCheck = validatePdfBuffer(buf);
+          if (!isPng && !isJpg && !pdfCheck.valid) {
+            return res.status(400).json({
+              error: "Supporting evidence must be a valid PDF, PNG, or JPEG file (max 5MB)."
+            });
+          }
+          const ext = isPng ? "png" : isJpg ? "jpg" : "pdf";
+          evidenceMime = isPng ? "image/png" : isJpg ? "image/jpeg" : "application/pdf";
+          evidenceOrigName = sanitizeFilename(req.file.originalname);
+          const safeBase = evidenceOrigName.replace(/\.[^.]+$/, "");
+          evidencePath = `verification-evidence/${u.id}/${Date.now()}_${safeBase}.${ext}`;
+          await req.storage.uploadPrivate(evidencePath, buf, evidenceMime);
+        }
+        const reqId = crypto6.randomUUID();
+        const supportsExtendedCols = await hasMigration003ProfileCols(db);
+        await db.transaction(
+          async (tx) => {
+            await tx.execute(
+              `INSERT INTO staff_verification_requests
+               (id, user_id, position, department, designation, university_email, supporting_notes,
+                evidence_object_path, evidence_original_filename, evidence_mime_type, status, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', NOW(), NOW())`,
+              [
+                reqId,
+                u.id,
+                parsed.data.position,
+                parsed.data.department,
+                parsed.data.designation,
+                u.email,
+                parsed.data.supporting_notes,
+                evidencePath,
+                evidenceOrigName,
+                evidenceMime
+              ]
+            );
+            if (supportsExtendedCols) {
+              await tx.execute(
+                `UPDATE profiles
+                 SET staff_position = $1,
+                     department = $2,
+                     designation = $3,
+                     updated_at = NOW()
+                 WHERE id = $4`,
+                [parsed.data.position, parsed.data.department, parsed.data.designation || null, u.id]
+              );
+            }
+            await syncModerationQueue(tx, "staff_verification", reqId, u.id, "pending");
+            await writeAuditLog(tx, u.id, "staff_verification_requested", "staff_verification", reqId, {
+              position: parsed.data.position,
+              department: parsed.data.department,
+              has_evidence: Boolean(evidencePath)
+            });
+          },
+          { actorId: u.id, trustedServer: false }
+        );
+        const refreshedUser = await getAuthUserFromDb(db, u.id);
+        return res.status(201).json({
+          status: "pending",
+          user: refreshedUser,
+          request: {
+            id: reqId,
+            user_id: u.id,
+            position: parsed.data.position,
+            department: parsed.data.department,
+            designation: parsed.data.designation,
+            university_email: u.email,
+            supporting_notes: parsed.data.supporting_notes,
+            has_evidence: Boolean(evidencePath),
+            evidence_original_filename: evidenceOrigName,
+            status: "pending",
+            reviewer_id: null,
+            review_notes: null,
+            reviewed_at: null,
+            created_at: (/* @__PURE__ */ new Date()).toISOString(),
+            updated_at: (/* @__PURE__ */ new Date()).toISOString()
+          },
+          message: "Your university staff verification request has been submitted for administrator review. Your account remains a standard member until approved."
+        });
+      } catch (err) {
+        return next(err);
+      }
+    }
+  );
   router.post(
     "/profile/avatar",
     requireAuth,
@@ -2611,10 +3069,7 @@ function createAuthRouter(db) {
   router.get("/users/:username", async (req, res, next) => {
     try {
       const row = await db.queryOne(
-        `SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio, u.role,
-                u.university_email_verified, u.email_verified, u.program_id, u.semester_id,
-                u.interests, u.privacy_settings, u.account_status, u.created_at,
-                p.name AS program_name, s.name AS semester_name
+        `SELECT u.*, p.name AS program_name, s.name AS semester_name
          FROM profiles u
          LEFT JOIN programs p ON p.id = u.program_id
          LEFT JOIN semesters s ON s.id = u.semester_id
@@ -2654,6 +3109,10 @@ function createAuthRouter(db) {
           program_name: privacy.show_program || isSelf ? row.program_name : null,
           semester_id: privacy.show_program || isSelf ? row.semester_id : null,
           semester_name: privacy.show_program || isSelf ? row.semester_name : null,
+          department: privacy.show_program || isSelf ? row.department ? String(row.department) : null : null,
+          student_id: isSelf ? row.student_id ? String(row.student_id) : null : null,
+          staff_position: row.role === "verified_teacher" ? row.staff_position ? String(row.staff_position) : null : null,
+          designation: row.role === "verified_teacher" ? row.designation ? String(row.designation) : null : null,
           interests: Array.isArray(row.interests) ? row.interests : [],
           account_status: row.account_status,
           created_at: new Date(String(row.created_at)).toISOString()
@@ -4622,7 +5081,7 @@ function createSpecialRouter(db) {
           "INSERT INTO confession_identity_vault (confession_id, author_id, created_at) VALUES ($1, $2, NOW())",
           [id, req.user.id]
         );
-        await syncModerationQueue(tx, "confession", id, req.user.id, "pending");
+        await syncModerationQueue(tx, "confession", id, null, "pending");
       });
       return res.status(201).json({
         id,
@@ -5293,10 +5752,19 @@ function createSpecialRouter(db) {
 }
 
 // server/app.ts
-function isOriginAllowed(origin) {
+function isOriginAllowed(origin, requestHost) {
   if (!origin) return true;
-  const configured = (process.env.CORS_ORIGIN || "").split(",").map((o) => o.trim().replace(/\/$/, "")).filter(Boolean);
   const normalized = origin.replace(/\/$/, "");
+  if (requestHost) {
+    try {
+      const originHost = new URL(normalized).host.toLowerCase();
+      if (originHost === requestHost.toLowerCase()) {
+        return true;
+      }
+    } catch {
+    }
+  }
+  const configured = (process.env.CORS_ORIGIN || "").split(",").map((o) => o.trim().replace(/\/$/, "")).filter(Boolean);
   if (configured.includes(normalized)) return true;
   if (process.env.APP_URL && normalized === process.env.APP_URL.trim().replace(/\/$/, "")) {
     return true;
@@ -5321,16 +5789,19 @@ function createApiApp(db, storage) {
     })
   );
   app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (isOriginAllowed(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error(`CORS policy blocked origin: ${origin}`));
-        }
-      },
-      credentials: true,
-      exposedHeaders: ["Content-Disposition"]
+    cors((req, callback) => {
+      const origin = typeof req.headers.origin === "string" ? req.headers.origin : void 0;
+      const forwardedHost = typeof req.headers["x-forwarded-host"] === "string" ? req.headers["x-forwarded-host"].split(",")[0].trim() : void 0;
+      const requestHost = forwardedHost || (typeof req.headers.host === "string" ? req.headers.host : void 0);
+      if (isOriginAllowed(origin, requestHost)) {
+        callback(null, {
+          origin: true,
+          credentials: true,
+          exposedHeaders: ["Content-Disposition"]
+        });
+      } else {
+        callback(new Error(`CORS policy blocked origin: ${origin}`));
+      }
     })
   );
   app.use(express.json({ limit: "2mb" }));

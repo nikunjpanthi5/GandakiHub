@@ -197,11 +197,17 @@ export async function initDatabase(): Promise<AppDatabase> {
   fs.mkdirSync(path.dirname(pgDataDir), { recursive: true });
   const pglite = new PGlite(pgDataDir, { extensions: { pg_trgm } });
 
-  const migrationSql = fs.readFileSync(
-    path.resolve(process.cwd(), 'supabase', 'migrations', '002_complete_production_schema.sql'),
-    'utf8'
-  );
-  await pglite.exec(migrationSql);
+  const migrationFiles = [
+    '002_complete_production_schema.sql',
+    '003_profile_completion_staff_verification.sql',
+  ];
+  for (const file of migrationFiles) {
+    const filePath = path.resolve(process.cwd(), 'supabase', 'migrations', file);
+    if (fs.existsSync(filePath)) {
+      const migrationSql = fs.readFileSync(filePath, 'utf8');
+      await pglite.exec(migrationSql);
+    }
+  }
 
   const db = createPGliteDatabase(pglite);
   cachedDb = db;

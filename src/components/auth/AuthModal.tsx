@@ -1,33 +1,50 @@
 import React, { useEffect, useState } from 'react';
-import { ShieldCheck, X } from 'lucide-react';
+import { Check, Eye, EyeOff, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { ApiError, api } from '../../lib/api.ts';
-import type { AuthUser, ExternalReason } from '../../types/index.ts';
+import type { AuthUser } from '../../types/index.ts';
 
 type AuthTab = 'login' | 'register' | 'verify_otp' | 'reset';
 
+const UNIVERSITY_DOMAIN = '@gandakiuniversity.edu.np';
+
+function getPasswordEvaluation(password: string): {
+  hasMinLength: boolean;
+  hasLetter: boolean;
+  hasNumber: boolean;
+  score: number;
+  label: 'Weak' | 'Fair' | 'Strong';
+} {
+  const hasMinLength = password.length >= 8;
+  const hasLetter = /[A-Za-z]/.test(password);
+  const hasNumber = /\d/.test(password);
+  const hasSymbolOrUpper = /[A-Z]/.test(password) && /[^A-Za-z0-9]/.test(password);
+  let score = 0;
+  if (hasMinLength) score += 1;
+  if (hasLetter && hasNumber) score += 1;
+  if (password.length >= 12 || hasSymbolOrUpper) score += 1;
+  const label = score >= 3 ? 'Strong' : score === 2 ? 'Fair' : 'Weak';
+  return { hasMinLength, hasLetter, hasNumber, score, label };
+}
+
 export function AuthModal() {
-  const { authModalOpen, authModalMode, setAuthModalOpen, structure, applyAuthSession, refreshCommunities, notify } = useApp();
+  const { authModalOpen, authModalMode, setAuthModalOpen, applyAuthSession, refreshCommunities, notify } = useApp();
   const [tab, setTab] = useState<AuthTab>('login');
-  const [loginRoleMode, setLoginRoleMode] = useState<'member' | 'admin'>('member');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  // Login fields
+  // Login fields (Email + Password only)
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
 
-  // Register fields
-  const [regCategory, setRegCategory] = useState<'university_member' | 'external'>('university_member');
-  const [memberType, setMemberType] = useState<'student' | 'teacher'>('student');
+  // Simplified Registration fields (Full Name, University Email, Password, Confirm Password only)
+  const [fullName, setFullName] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
-  const [regUsername, setRegUsername] = useState('');
-  const [regDisplayName, setRegDisplayName] = useState('');
-  const [regProgramId, setRegProgramId] = useState('');
-  const [regSemesterId, setRegSemesterId] = useState('');
-  const [extReason, setExtReason] = useState<ExternalReason>('future_student');
-  const [extDetail, setExtDetail] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   // OTP Verification
   const [otpEmail, setOtpEmail] = useState('');
@@ -39,47 +56,13 @@ export function AuthModal() {
   const [resetEmail, setResetEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [resetNewPass, setResetNewPass] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
   const [resetStep, setResetStep] = useState<'request' | 'confirm'>('request');
-
-  // First-time Super Admin bootstrap state
-  const [bootstrapStatus, setBootstrapStatus] = useState<{
-    needsSuperAdmin: boolean;
-    superAdminEmailConfigured: boolean;
-    configurationError?: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    if (!regProgramId && structure.programs.length > 0) {
-      const firstProg = structure.programs[0].id;
-      setRegProgramId(firstProg);
-      const firstSem = structure.semesters.find((s) => s.program_id === firstProg);
-      if (firstSem) setRegSemesterId(firstSem.id);
-    } else if (regProgramId && !regSemesterId) {
-      const firstSem = structure.semesters.find((s) => s.program_id === regProgramId);
-      if (firstSem) setRegSemesterId(firstSem.id);
-    }
-  }, [structure.programs, structure.semesters, regProgramId, regSemesterId]);
 
   useEffect(() => {
     if (!authModalOpen) return;
     setError('');
-    if (authModalMode === 'super_admin_login') {
-      setTab('login');
-      setLoginRoleMode('admin');
-    } else if (authModalMode === 'register') {
-      setTab('register');
-    } else {
-      setTab('login');
-      setLoginRoleMode('member');
-    }
-    api
-      .get<{
-        needsSuperAdmin: boolean;
-        superAdminEmailConfigured: boolean;
-        configurationError?: string | null;
-      }>('/api/auth/bootstrap-status')
-      .then(setBootstrapStatus)
-      .catch(() => {});
+    setTab(authModalMode === 'register' ? 'register' : 'login');
   }, [authModalOpen, authModalMode]);
 
   useEffect(() => {
@@ -90,7 +73,11 @@ export function AuthModal() {
 
   if (!authModalOpen) return null;
 
-  const filteredSemesters = structure.semesters.filter((s) => s.program_id === regProgramId);
+  const pwEval = getPasswordEvaluation(regPassword);
+  const trimmedEmail = regEmail.trim().toLowerCase();
+  const emailLooksValid = trimmedEmail.length === 0 || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  const isUniversityEmail = trimmedEmail.endsWith(UNIVERSITY_DOMAIN);
+  const passwordsMatch = confirmPassword.length === 0 || regPassword === confirmPassword;
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -98,7 +85,7 @@ export function AuthModal() {
     setBusy(true);
     try {
       const res = await api.post<{ user: AuthUser; sessionToken?: string }>('/api/auth/login', {
-        identifier: loginEmail,
+        identifier: loginEmail.trim(),
         password: loginPassword,
       });
       applyAuthSession(res.user, res.sessionToken);
@@ -114,7 +101,7 @@ export function AuthModal() {
         setError('');
         notify('Please verify your 6-digit email code to complete sign in.', 'info');
       } else {
-        setError(err instanceof Error ? err.message : 'Sign in failed');
+        setError(err instanceof Error ? err.message : 'Sign in failed.');
       }
     } finally {
       setBusy(false);
@@ -124,21 +111,33 @@ export function AuthModal() {
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault();
     setError('');
+
+    if (fullName.trim().length < 2) {
+      setError('Please enter your full name.');
+      return;
+    }
+    if (!trimmedEmail || !emailLooksValid || !isUniversityEmail) {
+      setError(`Please use a valid Gandaki University email (${UNIVERSITY_DOMAIN}).`);
+      return;
+    }
+    if (!pwEval.hasMinLength || !pwEval.hasLetter || !pwEval.hasNumber) {
+      setError('Password must be at least 8 characters and include both letters and numbers.');
+      return;
+    }
+    if (regPassword !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
     setBusy(true);
     try {
       const res = await api.post<{ email: string; resendCooldownSeconds: number; devOtpPreview?: string }>(
         '/api/auth/register',
         {
-          email: regEmail,
+          full_name: fullName.trim(),
+          email: trimmedEmail,
           password: regPassword,
-          username: regUsername,
-          display_name: regDisplayName,
-          category: regCategory,
-          member_type: memberType,
-          program_id: regCategory === 'university_member' ? regProgramId || null : null,
-          semester_id: regCategory === 'university_member' && memberType === 'student' ? regSemesterId || null : null,
-          external_reason: regCategory === 'external' ? extReason : null,
-          external_reason_detail: regCategory === 'external' ? extDetail : null,
+          confirm_password: confirmPassword,
         }
       );
       setOtpEmail(res.email);
@@ -149,7 +148,10 @@ export function AuthModal() {
       notify('Verification code issued. Enter your 6-digit OTP to activate & sign in.', 'info');
     } catch (err) {
       if (err instanceof ApiError && err.data?.requiresVerification) {
-        setOtpEmail(String(err.data.email || regEmail));
+        setOtpEmail(String(err.data.email || trimmedEmail));
+        setDevOtpHint(err.data.devOtpPreview ? String(err.data.devOtpPreview) : null);
+        setOtpCode('');
+        setTab('verify_otp');
         setError(err.message);
       } else {
         setError(err instanceof Error ? err.message : 'Registration failed.');
@@ -173,7 +175,7 @@ export function AuthModal() {
         applyAuthSession(res.user, res.sessionToken);
         void refreshCommunities();
         setAuthModalOpen(false);
-        notify(`Welcome, ${res.user.display_name}! Account verified and signed in.`, 'success');
+        notify(`Welcome, ${res.user.display_name}! Your account is verified and signed in.`, 'success');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'OTP verification failed.');
@@ -203,19 +205,24 @@ export function AuthModal() {
     setBusy(true);
     try {
       if (resetStep === 'request') {
-        const res = await api.post<{ devOtpPreview?: string }>('/api/auth/request-password-reset', { email: resetEmail });
+        const res = await api.post<{ devOtpPreview?: string }>('/api/auth/request-password-reset', {
+          email: resetEmail.trim(),
+        });
         setDevOtpHint(res.devOtpPreview || null);
         setResetStep('confirm');
         notify('If the email exists, a 6-digit reset code was issued.', 'info');
       } else {
         await api.post('/api/auth/reset-password', {
-          email: resetEmail,
+          email: resetEmail.trim(),
           code: resetCode,
           new_password: resetNewPass,
         });
         notify('Password updated. Sign in with your new password.', 'success');
         setTab('login');
-        setLoginEmail(resetEmail);
+        setLoginEmail(resetEmail.trim());
+        setResetStep('request');
+        setResetCode('');
+        setResetNewPass('');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Password reset failed.');
@@ -226,12 +233,18 @@ export function AuthModal() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 overflow-y-auto">
-      <div className="w-full max-w-xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl overflow-hidden my-auto">
+      <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl overflow-hidden my-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">GandakiHub Account Access</h2>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">GandakiHub</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Verify via @gandakiuniversity.edu.np or register as an external participant
+              {tab === 'register'
+                ? 'Create your campus account with your university email'
+                : tab === 'verify_otp'
+                  ? 'Confirm your 6-digit email verification code'
+                  : tab === 'reset'
+                    ? 'Reset your account password'
+                    : 'Sign in with your email and password'}
             </p>
           </div>
           <button
@@ -244,7 +257,7 @@ export function AuthModal() {
           </button>
         </div>
 
-        <div className="px-6 pt-4 flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
+        <div className="px-6 pt-3.5 flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
           {(['login', 'register', 'reset'] as AuthTab[]).map((t) => (
             <button
               key={t}
@@ -264,301 +277,233 @@ export function AuthModal() {
           ))}
         </div>
 
-        <div className="p-6 space-y-5 max-h-[78vh] overflow-y-auto">
+        <div className="p-6 space-y-4 max-h-[78vh] overflow-y-auto">
           {error && (
-            <div className="rounded-lg border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-4 py-2.5 text-sm text-red-800 dark:text-red-200">
+            <div className="rounded-lg border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-4 py-2.5 text-xs font-medium text-red-800 dark:text-red-200">
               {error}
             </div>
           )}
 
           {tab === 'login' && (
             <form onSubmit={handleLogin} className="space-y-4">
-              <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-slate-100 dark:bg-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setLoginRoleMode('member')}
-                  className={`py-1.5 px-3 rounded-md text-xs font-medium transition-colors ${
-                    loginRoleMode === 'member'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  Member / External
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLoginRoleMode('admin')}
-                  className={`py-1.5 px-3 rounded-md text-xs font-medium transition-colors ${
-                    loginRoleMode === 'admin'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  Admin / Super Admin
-                </button>
-              </div>
-
-              {loginRoleMode === 'admin' && (
-                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3 text-xs text-slate-600 dark:text-slate-300 space-y-1.5">
-                  <p>
-                    Admins sign in with the <span className="font-mono">username</span> and password created by the Super Admin. Super Admin signs in with their email (<span className="font-mono">SUPER_ADMIN_EMAIL</span>).
-                  </p>
-                  {bootstrapStatus?.needsSuperAdmin && bootstrapStatus.superAdminEmailConfigured && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTab('register');
-                        setRegCategory('external');
-                        setExtReason('platform_admin');
-                        setError('');
-                      }}
-                      className="text-blue-700 dark:text-blue-400 font-medium hover:underline"
-                    >
-                      First time? Register your Super Admin account under External Users &rarr;
-                    </button>
-                  )}
-                  {bootstrapStatus?.needsSuperAdmin && !bootstrapStatus.superAdminEmailConfigured && (
-                    <p className="text-amber-700 dark:text-amber-400 font-medium">
-                      {bootstrapStatus.configurationError || 'SUPER_ADMIN_EMAIL is not configured on the backend server.'}
-                    </p>
-                  )}
-                </div>
-              )}
-
               <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  {loginRoleMode === 'admin' ? 'Admin Username or Super Admin Email' : 'Email or Username'}
+                <label htmlFor="auth-login-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Email
                 </label>
                 <input
-                  type="text"
+                  id="auth-login-email"
+                  type="email"
                   required
+                  autoComplete="email"
                   value={loginEmail}
                   onChange={(e) => setLoginEmail(e.target.value)}
-                  placeholder={loginRoleMode === 'admin' ? 'admin_username or snikunj769@gmail.com' : 'name@gandakiuniversity.edu.np or username'}
+                  placeholder="name@gandakiuniversity.edu.np"
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
                 />
               </div>
+
               <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Password</label>
-                <input
-                  type="password"
-                  required
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                />
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="auth-login-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetEmail(loginEmail);
+                      setResetStep('request');
+                      setError('');
+                      setTab('reset');
+                    }}
+                    className="text-xs text-blue-700 dark:text-blue-400 hover:underline"
+                  >
+                    Forgot password?
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    id="auth-login-password"
+                    type={showLoginPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Enter your password"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 pl-3 pr-10 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((s) => !s)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                    aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
+
               <button
                 type="submit"
                 disabled={busy}
                 className="w-full rounded-lg bg-slate-900 dark:bg-blue-600 text-white py-2.5 px-4 text-sm font-medium hover:bg-slate-800 dark:hover:bg-blue-500 disabled:opacity-50"
               >
-                {busy ? 'Signing in...' : loginRoleMode === 'admin' ? 'Sign In as Admin / Super Admin' : 'Sign In'}
+                {busy ? 'Signing in...' : 'Sign In'}
               </button>
+
+              <p className="text-center text-xs text-slate-500 dark:text-slate-400">
+                New to GandakiHub?{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab('register');
+                    setError('');
+                  }}
+                  className="font-medium text-blue-700 dark:text-blue-400 hover:underline"
+                >
+                  Create an account
+                </button>
+              </p>
             </form>
           )}
 
           {tab === 'register' && (
             <form onSubmit={handleRegister} className="space-y-4">
-              <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-slate-100 dark:bg-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setRegCategory('university_member')}
-                  className={`py-2 px-3 rounded-md text-xs font-medium transition-colors ${
-                    regCategory === 'university_member'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  University Member
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRegCategory('external')}
-                  className={`py-2 px-3 rounded-md text-xs font-medium transition-colors ${
-                    regCategory === 'external'
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  External / Prospective
-                </button>
-              </div>
-
-              {regCategory === 'university_member' ? (
-                <div className="space-y-3">
-                  <p className="text-xs text-slate-600 dark:text-slate-400">
-                    Requires a valid <span className="font-mono">@gandakiuniversity.edu.np</span> address and 6-digit OTP verification.
-                  </p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Role Type</label>
-                      <select
-                        value={memberType}
-                        onChange={(e) => setMemberType(e.target.value as 'student' | 'teacher')}
-                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                      >
-                        <option value="student">Student</option>
-                        <option value="teacher">Teacher / Faculty</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Program</label>
-                      <select
-                        value={regProgramId}
-                        onChange={(e) => {
-                          setRegProgramId(e.target.value);
-                          const firstSem = structure.semesters.find((s) => s.program_id === e.target.value);
-                          if (firstSem) setRegSemesterId(firstSem.id);
-                        }}
-                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                      >
-                        {structure.programs.map((p) => (
-                          <option key={p.id} value={p.id}>{p.code} — {p.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {memberType === 'student' && (
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Current Semester</label>
-                      <select
-                        value={regSemesterId}
-                        onChange={(e) => setRegSemesterId(e.target.value)}
-                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                      >
-                        {filteredSemesters.map((s) => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Reason for Joining</label>
-                    <select
-                      value={extReason}
-                      onChange={(e) => {
-                        const val = e.target.value as ExternalReason;
-                        setExtReason(val);
-                      }}
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                    >
-                      <option value="future_student">Future student / prospective applicant</option>
-                      <option value="parent_guardian">Parent or guardian</option>
-                      <option value="university_visitor">University visitor</option>
-                      <option value="researcher">Researcher</option>
-                      <option value="alumni">Alumni</option>
-                      {bootstrapStatus?.needsSuperAdmin && bootstrapStatus.superAdminEmailConfigured && (
-                        <option value="platform_admin">Platform Admin / Super Admin Setup</option>
-                      )}
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  {extReason === 'platform_admin' && (
-                    <p className="text-xs text-blue-700 dark:text-blue-400">
-                      Register with your configured <span className="font-mono">SUPER_ADMIN_EMAIL</span> and verify the 6-digit OTP to initialize Super Admin access.
-                    </p>
-                  )}
-                  {extReason === 'other' && (
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Short Explanation (Required)</label>
-                      <input
-                        type="text"
-                        required
-                        value={extDetail}
-                        onChange={(e) => setExtDetail(e.target.value)}
-                        placeholder="Describe your connection to Gandaki University"
-                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Display Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={regDisplayName}
-                    onChange={(e) => setRegDisplayName(e.target.value)}
-                    placeholder="Sita Sharma"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Username</label>
-                  <input
-                    type="text"
-                    required
-                    value={regUsername}
-                    onChange={(e) => setRegUsername(e.target.value)}
-                    placeholder="sita_bit"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                  />
-                </div>
+              <div>
+                <label htmlFor="auth-reg-name" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Full Name
+                </label>
+                <input
+                  id="auth-reg-name"
+                  type="text"
+                  required
+                  autoComplete="name"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="Sita Sharma"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  {regCategory === 'university_member' ? 'University Email (@gandakiuniversity.edu.np)' : 'Email Address'}
+                <label htmlFor="auth-reg-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Gandaki University Email
                 </label>
                 <input
+                  id="auth-reg-email"
                   type="email"
                   required
+                  autoComplete="email"
                   value={regEmail}
                   onChange={(e) => setRegEmail(e.target.value)}
-                  placeholder={regCategory === 'university_member' ? 'sita@gandakiuniversity.edu.np' : 'you@example.com'}
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
+                  placeholder="sita@gandakiuniversity.edu.np"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
                 />
+                <p className={`mt-1 text-[11px] ${trimmedEmail && !isUniversityEmail ? 'text-amber-700 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                  Must be an official <span className="font-mono">@gandakiuniversity.edu.np</span> address.
+                </p>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Password (8+ chars, letters & numbers)
+                <label htmlFor="auth-reg-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Password
                 </label>
-                <input
-                  type="password"
-                  required
-                  value={regPassword}
-                  onChange={(e) => setRegPassword(e.target.value)}
-                  placeholder="Create a strong password"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                />
+                <div className="relative">
+                  <input
+                    id="auth-reg-password"
+                    type={showRegPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="new-password"
+                    value={regPassword}
+                    onChange={(e) => setRegPassword(e.target.value)}
+                    placeholder="At least 8 characters with letters & numbers"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 pl-3 pr-10 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowRegPassword((s) => !s)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                    aria-label={showRegPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showRegPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                {regPassword.length > 0 && (
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-500 dark:text-slate-400">Password strength</span>
+                      <span
+                        className={`font-medium ${
+                          pwEval.label === 'Strong'
+                            ? 'text-emerald-700 dark:text-emerald-400'
+                            : pwEval.label === 'Fair'
+                              ? 'text-blue-700 dark:text-blue-400'
+                              : 'text-amber-700 dark:text-amber-400'
+                        }`}
+                      >
+                        {pwEval.label}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 h-1">
+                      <div className={`rounded-sm ${pwEval.score >= 1 ? (pwEval.label === 'Strong' ? 'bg-emerald-600' : pwEval.label === 'Fair' ? 'bg-blue-600' : 'bg-amber-500') : 'bg-slate-200 dark:bg-slate-800'}`} />
+                      <div className={`rounded-sm ${pwEval.score >= 2 ? (pwEval.label === 'Strong' ? 'bg-emerald-600' : 'bg-blue-600') : 'bg-slate-200 dark:bg-slate-800'}`} />
+                      <div className={`rounded-sm ${pwEval.score >= 3 ? 'bg-emerald-600' : 'bg-slate-200 dark:bg-slate-800'}`} />
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className={pwEval.hasMinLength ? 'text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1' : ''}>
+                        {pwEval.hasMinLength && <Check className="w-3 h-3" />} 8+ chars
+                      </span>
+                      <span className={pwEval.hasLetter ? 'text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1' : ''}>
+                        {pwEval.hasLetter && <Check className="w-3 h-3" />} Letter
+                      </span>
+                      <span className={pwEval.hasNumber ? 'text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1' : ''}>
+                        {pwEval.hasNumber && <Check className="w-3 h-3" />} Number
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {bootstrapStatus?.needsSuperAdmin && (
-                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3 space-y-1.5">
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800 dark:text-slate-200">
-                    <ShieldCheck className="w-4 h-4 text-blue-700 dark:text-blue-400 shrink-0" />
-                    <span>First-Time Platform Setup</span>
-                  </div>
-                  {bootstrapStatus.superAdminEmailConfigured ? (
-                    <p className="text-xs text-slate-600 dark:text-slate-400">
-                      No Super Admin exists yet. Registering and verifying the configured{' '}
-                      <span className="font-mono">SUPER_ADMIN_EMAIL</span> will initialize the Super Admin account.
-                    </p>
-                  ) : (
-                    <p className="text-xs text-amber-700 dark:text-amber-400">
-                      {bootstrapStatus.configurationError ||
-                        'Super Admin setup is disabled until SUPER_ADMIN_EMAIL is configured in the server environment.'}
-                    </p>
-                  )}
+              <div>
+                <label htmlFor="auth-reg-confirm-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Confirm Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="auth-reg-confirm-password"
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Re-enter your password"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 pl-3 pr-10 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword((s) => !s)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                    aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-              )}
+                {!passwordsMatch && (
+                  <p className="mt-1 text-[11px] text-red-700 dark:text-red-400">Passwords do not match.</p>
+                )}
+              </div>
 
               <button
                 type="submit"
-                disabled={busy}
+                disabled={busy || !passwordsMatch}
                 className="w-full rounded-lg bg-slate-900 dark:bg-blue-600 text-white py-2.5 px-4 text-sm font-medium hover:bg-slate-800 dark:hover:bg-blue-500 disabled:opacity-50"
               >
-                {busy ? 'Creating Account...' : 'Continue & Send 6-Digit Verification Code'}
+                {busy ? 'Creating Account...' : 'Create Account & Verify Email'}
               </button>
+
+              <p className="text-center text-xs text-slate-500 dark:text-slate-400">
+                You can optionally add your program, semester, or staff verification details from your profile after signing in.
+              </p>
             </form>
           )}
 
@@ -572,7 +517,7 @@ export function AuthModal() {
                 {devOtpHint && (
                   <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-mono text-blue-700 dark:text-blue-400">
-                      Local OTP Preview (set RESEND_API_KEY for email delivery): {devOtpHint}
+                      Local OTP Preview: {devOtpHint}
                     </p>
                     <button
                       type="button"
@@ -610,7 +555,7 @@ export function AuthModal() {
                   disabled={busy || otpCode.length !== 6}
                   className="rounded-lg bg-slate-900 dark:bg-blue-600 text-white py-2 px-5 text-sm font-medium disabled:opacity-50"
                 >
-                  {busy ? 'Verifying...' : 'Verify & Activate'}
+                  {busy ? 'Verifying...' : 'Verify & Sign In'}
                 </button>
               </div>
             </form>
@@ -625,6 +570,7 @@ export function AuthModal() {
                   required
                   value={resetEmail}
                   onChange={(e) => setResetEmail(e.target.value)}
+                  placeholder="name@gandakiuniversity.edu.np"
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
                 />
               </div>
@@ -648,13 +594,23 @@ export function AuthModal() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">New Password</label>
-                    <input
-                      type="password"
-                      required
-                      value={resetNewPass}
-                      onChange={(e) => setResetNewPass(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-                    />
+                    <div className="relative">
+                      <input
+                        type={showResetPassword ? 'text' : 'password'}
+                        required
+                        value={resetNewPass}
+                        onChange={(e) => setResetNewPass(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 pl-3 pr-10 py-2 text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowResetPassword((s) => !s)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                        aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                      >
+                        {showResetPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
                 </>
               )}

@@ -14,14 +14,26 @@ import { createSearchRouter } from './routes/search.ts';
 import { createSocialRouter } from './routes/social.ts';
 import { createSpecialRouter } from './routes/special.ts';
 
-function isOriginAllowed(origin: string | undefined): boolean {
+function isOriginAllowed(origin: string | undefined, requestHost?: string): boolean {
   if (!origin) return true; // same-origin or server-to-server / curl
+  const normalized = origin.replace(/\/$/, '');
+
+  if (requestHost) {
+    try {
+      const originHost = new URL(normalized).host.toLowerCase();
+      if (originHost === requestHost.toLowerCase()) {
+        return true;
+      }
+    } catch {
+      // ignore malformed origin header
+    }
+  }
+
   const configured = (process.env.CORS_ORIGIN || '')
     .split(',')
     .map((o) => o.trim().replace(/\/$/, ''))
     .filter(Boolean);
 
-  const normalized = origin.replace(/\/$/, '');
   if (configured.includes(normalized)) return true;
 
   if (process.env.APP_URL && normalized === process.env.APP_URL.trim().replace(/\/$/, '')) {
@@ -52,16 +64,23 @@ export function createApiApp(db: AppDatabase, storage: StorageService): Express 
     })
   );
   app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (isOriginAllowed(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error(`CORS policy blocked origin: ${origin}`));
-        }
-      },
-      credentials: true,
-      exposedHeaders: ['Content-Disposition'],
+    cors((req, callback) => {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+      const forwardedHost =
+        typeof req.headers['x-forwarded-host'] === 'string'
+          ? req.headers['x-forwarded-host'].split(',')[0].trim()
+          : undefined;
+      const requestHost = forwardedHost || (typeof req.headers.host === 'string' ? req.headers.host : undefined);
+
+      if (isOriginAllowed(origin, requestHost)) {
+        callback(null, {
+          origin: true,
+          credentials: true,
+          exposedHeaders: ['Content-Disposition'],
+        });
+      } else {
+        callback(new Error(`CORS policy blocked origin: ${origin}`));
+      }
     })
   );
   app.use(express.json({ limit: '2mb' }));

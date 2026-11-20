@@ -62,7 +62,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [trendingSide, setTrendingSide] = useState<TrendingSidebarData | null>(null);
+  const [completionBannerDismissed, setCompletionBannerDismissed] = useState<boolean>(() => {
+    try {
+      return window.sessionStorage.getItem('gh_dismiss_profile_banner') === '1';
+    } catch {
+      return false;
+    }
+  });
   const searchBoxRef = useRef<HTMLDivElement>(null);
+
+  function dismissCompletionBanner() {
+    setCompletionBannerDismissed(true);
+    try {
+      window.sessionStorage.setItem('gh_dismiss_profile_banner', '1');
+    } catch {
+      // ignore storage failure
+    }
+  }
 
   useEffect(() => {
     api.get<TrendingSidebarData>('/api/trending?window=day').then(setTrendingSide).catch(() => {});
@@ -448,7 +464,44 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </aside>
 
         {/* Center Main Workspace */}
-        <main className="min-w-0 space-y-5">{children}</main>
+        <main className="min-w-0 space-y-5">
+          {user && !user.profile_completed && !isStaff && !completionBannerDismissed && route.page !== 'profile' && (
+            <section
+              aria-label="Profile completion prompt"
+              className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  <span>Complete your profile to get the most out of GandakiHub.</span>
+                  <span className="font-mono tabular-nums text-[11px] text-blue-700 dark:text-blue-400">
+                    {user.profile_completion_pct}%
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Add your department, academic program, or submit university staff verification from your profile anytime.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => navigate('profile')}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium hover:bg-slate-800 dark:hover:bg-blue-500 whitespace-nowrap"
+                >
+                  Complete Profile
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissCompletionBanner}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  aria-label="Dismiss profile completion banner"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </section>
+          )}
+          {children}
+        </main>
 
         {/* Right Sidebar: Trending Searches, Communities, Resources, Events */}
         <aside className="hidden xl:block space-y-5">

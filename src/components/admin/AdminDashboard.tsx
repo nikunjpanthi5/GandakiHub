@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { api, formatBytes, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
-import type { Community, UserRole } from '../../types/index.ts';
+import type { Community, StaffVerificationRequest, UserRole } from '../../types/index.ts';
 
-type AdminTab = 'overview' | 'academic' | 'moderation' | 'users' | 'profanity' | 'audit';
+type AdminTab = 'overview' | 'academic' | 'moderation' | 'staff_verification' | 'users' | 'profanity' | 'audit';
 
 interface AdminOverviewData {
   stats: Record<string, number>;
@@ -43,9 +43,12 @@ interface AdminOverviewData {
 }
 
 export function AdminDashboard() {
-  const { user, structure, refreshStructure, refreshCommunities, openAuthModal, notify } = useApp();
+  const { user, structure, refreshStructure, refreshCommunities, navigate, notify } = useApp();
   const [tab, setTab] = useState<AdminTab>('overview');
   const [overview, setOverview] = useState<AdminOverviewData | null>(null);
+  const [staffRequests, setStaffRequests] = useState<StaffVerificationRequest[]>([]);
+  const [staffFilter, setStaffFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [staffReviewNotes, setStaffReviewNotes] = useState<Record<string, string>>({});
   const [usersList, setUsersList] = useState<Array<{ id: string; email: string; username: string; display_name: string; role: UserRole; account_status: string; university_email_verified: boolean | number; program_code: string | null }>>([]);
   const [userSearch, setUserSearch] = useState('');
   const [profanityList, setProfanityList] = useState<Array<{ id: string; term: string; language: string; severity: string; context_exception_note: string | null }>>([]);
@@ -105,8 +108,8 @@ export function AdminDashboard() {
   const [vaultReason, setVaultReason] = useState('');
   const [vaultResult, setVaultResult] = useState<{ username: string; display_name: string; email: string; role: string } | null>(null);
 
-  // Authorized PDF inspection modal
-  const [inspectPdfModal, setInspectPdfModal] = useState<{ title: string; blobUrl: string } | null>(null);
+  // Authorized PDF / Evidence inspection modal
+  const [inspectPdfModal, setInspectPdfModal] = useState<{ title: string; blobUrl: string; isImage?: boolean } | null>(null);
 
   const isStaff = user && ['super_admin', 'admin', 'community_moderator'].includes(user.role);
   const isAdmin = user && ['super_admin', 'admin'].includes(user.role);
@@ -145,6 +148,14 @@ export function AdminDashboard() {
     setAuditLogs(data.logs);
   }, [isAdmin]);
 
+  const loadStaffRequests = useCallback(async () => {
+    if (!isAdmin) return;
+    const data = await api.get<{ requests: StaffVerificationRequest[] }>(
+      `/api/admin/staff-verification?status=${encodeURIComponent(staffFilter)}`
+    );
+    setStaffRequests(data.requests);
+  }, [isAdmin, staffFilter]);
+
   useEffect(() => {
     void loadOverview();
     void loadAllAcademic();
@@ -166,7 +177,8 @@ export function AdminDashboard() {
   useEffect(() => {
     if (tab === 'users') void loadUsers();
     if (tab === 'audit') void loadAudit();
-  }, [tab, loadUsers, loadAudit]);
+    if (tab === 'staff_verification') void loadStaffRequests();
+  }, [tab, loadUsers, loadAudit, loadStaffRequests]);
 
   if (!isStaff) {
     return (
@@ -178,10 +190,10 @@ export function AdminDashboard() {
         </p>
         <button
           type="button"
-          onClick={() => openAuthModal('super_admin_login')}
-          className="px-4 py-2 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium hover:bg-slate-800 dark:hover:bg-blue-500"
+          onClick={() => navigate('home')}
+          className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
         >
-          Sign In as Admin / Super Admin
+          Return Home
         </button>
       </div>
     );
@@ -391,6 +403,38 @@ export function AdminDashboard() {
     }
   }
 
+  async function handleInspectStaffEvidence(reqId: string, title: string) {
+    try {
+      const blob = await api.fetchBlob(`/api/admin/staff-verification/${encodeURIComponent(reqId)}/evidence`);
+      const blobUrl = URL.createObjectURL(blob);
+      const isImage = blob.type.startsWith('image/');
+      setInspectPdfModal((prev) => {
+        if (prev) URL.revokeObjectURL(prev.blobUrl);
+        return { title, blobUrl, isImage };
+      });
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to open supporting document.', 'error');
+    }
+  }
+
+  async function handleReviewStaffRequest(reqId: string, decision: 'approved' | 'rejected') {
+    try {
+      await api.post(`/api/admin/staff-verification/${encodeURIComponent(reqId)}/review`, {
+        decision,
+        review_notes: (staffReviewNotes[reqId] || '').trim(),
+      });
+      await Promise.all([loadStaffRequests(), loadOverview(), loadUsers()]);
+      notify(
+        decision === 'approved'
+          ? 'Staff verification approved and user promoted to Verified Teacher.'
+          : 'Staff verification request declined.',
+        decision === 'approved' ? 'success' : 'info'
+      );
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Review action failed.', 'error');
+    }
+  }
+
   const semsForProg = fullStruct.semesters.filter((s) => s.program_id === selectedProgId);
   const subjsForSem = fullStruct.subjects.filter((s) => s.semester_id === selectedSemId);
   const foldersForSubj = fullStruct.folders.filter((f) => f.subject_id === selectedSubjId);
@@ -409,19 +453,9 @@ export function AdminDashboard() {
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {isSuperAdmin ? (
-              <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
-                Super Admin Session Active
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => openAuthModal('super_admin_login')}
-                className="px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium hover:bg-slate-800 dark:hover:bg-blue-500 whitespace-nowrap"
-              >
-                Login as Super Admin
-              </button>
-            )}
+            <span className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200">
+              {formatRoleLabel(user.role)} Session Active
+            </span>
           </div>
         </div>
 
@@ -429,6 +463,7 @@ export function AdminDashboard() {
           {([
             { id: 'overview', label: 'Overview' },
             { id: 'moderation', label: 'Review Queues' },
+            ...(isAdmin ? [{ id: 'staff_verification', label: `Staff Verification${overview?.stats?.pending_staff_verifications ? ` (${overview.stats.pending_staff_verifications})` : ''}` }] : []),
             ...(isAdmin ? [{ id: 'academic', label: 'Academic Structure' }] : []),
             ...(isAdmin ? [{ id: 'users', label: 'Users & Roles' }] : []),
             { id: 'profanity', label: 'Profanity Filter' },
@@ -457,6 +492,7 @@ export function AdminDashboard() {
             { label: 'Verified Teachers', value: overview.stats.verified_teachers },
             { label: 'Approved Resources', value: overview.stats.total_resources },
             { label: 'Pending PDFs / Revisions', value: overview.stats.pending_resources },
+            { label: 'Pending Staff Verifications', value: overview.stats.pending_staff_verifications ?? 0 },
             { label: 'Pending Confessions', value: overview.stats.pending_confessions },
             { label: 'Pending Complaints', value: overview.stats.pending_complaints },
             { label: 'Open Reports', value: overview.stats.open_reports },
@@ -1038,6 +1074,114 @@ export function AdminDashboard() {
         </div>
       )}
 
+      {/* STAFF VERIFICATION REQUESTS */}
+      {tab === 'staff_verification' && isAdmin && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold">University Staff Verification Requests</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Review applicant position, department, university email, and private supporting documents before elevating privileges.
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {(['pending', 'approved', 'rejected', 'all'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setStaffFilter(st)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium capitalize ${
+                    staffFilter === st
+                      ? 'bg-slate-900 text-white dark:bg-blue-600'
+                      : 'border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {st}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {staffRequests.length === 0 ? (
+            <p className="text-xs text-slate-500">No {staffFilter === 'all' ? '' : staffFilter} staff verification requests.</p>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {staffRequests.map((req) => (
+                <div key={req.id} className="py-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                    <div className="space-y-1 text-xs">
+                      <div className="text-sm font-semibold text-slate-900 dark:text-white">
+                        {req.requester_name || 'Applicant'}{' '}
+                        <span className="font-mono text-xs text-slate-500">@{req.requester_username}</span>
+                      </div>
+                      <div className="text-slate-600 dark:text-slate-300">
+                        <strong>Position:</strong> {req.position} · <strong>Designation:</strong> {req.designation} ·{' '}
+                        <strong>Department:</strong> {req.department}
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-500">
+                        University Email: {req.university_email} · Current Role: {formatRoleLabel((req.requester_role || 'verified_student') as UserRole)}
+                      </div>
+                      {req.supporting_notes && (
+                        <p className="text-slate-600 dark:text-slate-300 pt-1">
+                          Notes: {req.supporting_notes}
+                        </p>
+                      )}
+                      {req.review_notes && (
+                        <p className="text-slate-500 pt-1">
+                          Review Notes: {req.review_notes}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 text-[11px] font-mono uppercase">
+                        {req.status}
+                      </span>
+                      {req.has_evidence && (
+                        <button
+                          type="button"
+                          onClick={() => void handleInspectStaffEvidence(req.id, `${req.requester_name || req.university_email} — Verification Evidence`)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          <Eye className="w-3.5 h-3.5" /> View Evidence
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {req.status === 'pending' && (
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <input
+                        type="text"
+                        value={staffReviewNotes[req.id] || ''}
+                        onChange={(e) => setStaffReviewNotes((prev) => ({ ...prev, [req.id]: e.target.value }))}
+                        placeholder="Optional review notes for applicant..."
+                        className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs"
+                      />
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleReviewStaffRequest(req.id, 'approved')}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-medium"
+                        >
+                          <Check className="w-3.5 h-3.5" /> Approve Staff
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleReviewStaffRequest(req.id, 'rejected')}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium"
+                        >
+                          <X className="w-3.5 h-3.5" /> Reject
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* USERS & ROLES */}
       {tab === 'users' && isAdmin && (
         <div className="space-y-5">
@@ -1360,16 +1504,26 @@ export function AdminDashboard() {
                   setInspectPdfModal(null);
                 }}
                 className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                aria-label="Close PDF preview"
+                aria-label="Close document preview"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <iframe
-              src={inspectPdfModal.blobUrl}
-              title={inspectPdfModal.title}
-              className="flex-1 w-full bg-slate-100 dark:bg-slate-950"
-            />
+            {inspectPdfModal.isImage ? (
+              <div className="flex-1 overflow-auto flex items-center justify-center bg-slate-100 dark:bg-slate-950 p-4">
+                <img
+                  src={inspectPdfModal.blobUrl}
+                  alt={inspectPdfModal.title}
+                  className="max-h-full max-w-full object-contain rounded-lg"
+                />
+              </div>
+            ) : (
+              <iframe
+                src={inspectPdfModal.blobUrl}
+                title={inspectPdfModal.title}
+                className="flex-1 w-full bg-slate-100 dark:bg-slate-950"
+              />
+            )}
           </div>
         </div>
       )}

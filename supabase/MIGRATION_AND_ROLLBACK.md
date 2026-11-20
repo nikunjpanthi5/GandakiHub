@@ -22,7 +22,11 @@
 2. Open `/supabase/migrations/002_complete_production_schema.sql` from this repository, copy its full contents, and run it once.
    - Safe & idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, `DROP TRIGGER IF EXISTS ... CREATE TRIGGER`, and RLS policies on all 49 tables).
    - Creates `user_credentials` (strict `USING (FALSE)` RLS — password hashes never exposed to PostgREST/anon/authenticated keys), `confession_identity_vault` (strict Super Admin isolation), `audit_logs` (append-only protection trigger), `enforce_profile_privilege_guard()` trigger, full-text GIN indexes (`to_tsvector('simple', ...)`), and `pg_trgm` fuzzy search indexes.
-3. Run `/supabase/seed.sql` in **SQL Editor -> New Query**:
+3. Run `/supabase/migrations/003_profile_completion_staff_verification.sql` in **SQL Editor -> New Query**:
+   - **Zero Data Loss Guarantee:** Purely additive (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`). Contains zero `DROP`, `TRUNCATE`, or `DELETE` statements.
+   - Adds optional nullable/defaulted profile completion fields to `profiles` (`department`, `student_id`, `staff_position`, `designation`, `profile_completed`) without altering existing IDs, roles, or credentials.
+   - Creates `staff_verification_requests` with strict RLS policies and a partial unique index preventing duplicate pending verification requests.
+4. Run `/supabase/seed.sql` in **SQL Editor -> New Query** (skip if structural data is already seeded — `ON CONFLICT DO NOTHING` preserves all edited names):
    - Seeds **only structural academic data**:
      - `programs` (5 programs: `BIT`, `BBA`, `BPH`, `B.Sc.CSIT`, `Civil Engineering`)
      - `semesters` (40 semesters, 8 per program)
@@ -37,7 +41,7 @@
 
 ## 3. Verification Queries (Run in SQL Editor)
 
-Confirm all 49 tables and structural counts exist:
+Confirm all 50 tables and structural counts exist:
 
 ```sql
 SELECT count(*) AS table_count
@@ -45,6 +49,9 @@ FROM information_schema.tables
 WHERE table_schema = 'public' AND table_type = 'BASE TABLE';
 
 SELECT
+  (SELECT count(*) FROM public.profiles) AS profiles,
+  (SELECT count(*) FROM public.posts) AS posts,
+  (SELECT count(*) FROM public.confessions) AS confessions,
   (SELECT count(*) FROM public.programs) AS programs,
   (SELECT count(*) FROM public.semesters) AS semesters,
   (SELECT count(*) FROM public.subjects) AS subjects,
@@ -54,6 +61,7 @@ SELECT
 ```
 
 Expected:
+- Existing `profiles`, `posts`, and `confessions` counts remain unchanged before and after migration `003`.
 - `programs = 5`, `semesters = 40`, `subjects = 200`, `categories = 7`, `communities = 11`.
 - Verify RLS is enabled across public tables:
 

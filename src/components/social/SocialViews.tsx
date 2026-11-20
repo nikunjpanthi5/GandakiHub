@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  BadgeCheck,
   Bell,
   Check,
+  Clock,
+  FileUp,
   LockKeyhole,
   MessageSquareLock,
   Search,
@@ -18,6 +21,8 @@ import type {
   ConnectionSummary,
   NotificationItem,
   PublicProfile,
+  StaffVerificationRequest,
+  StaffVerificationStatus,
   UserRole,
 } from '../../types/index.ts';
 
@@ -396,23 +401,50 @@ export function NotificationsView() {
 }
 
 // ================= PROFILE =================
+const STAFF_POSITIONS = [
+  'Teacher',
+  'Faculty',
+  'Staff',
+  'Lecturer',
+  'Assistant Professor',
+  'Associate Professor',
+  'Professor',
+  'Administrative Staff',
+  'Other',
+];
+
 export function ProfileView({ username }: { username?: string }) {
   const { user, structure, refreshUser, setAuthModalOpen, notify } = useApp();
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [posts, setPosts] = useState<Array<{ id: string; title: string; community_name: string; upvote_count: number; created_at: string }>>([]);
   const [resources, setResources] = useState<Array<{ id: string; title: string; status: string; subject_name: string; category_name: string; download_count: number }>>([]);
   const [editing, setEditing] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
 
   // Edit state
   const [displayName, setDisplayName] = useState('');
   const [bio, setBio] = useState('');
+  const [department, setDepartment] = useState('');
+  const [studentId, setStudentId] = useState('');
   const [programId, setProgramId] = useState('');
   const [semesterId, setSemesterId] = useState('');
   const [interestsStr, setInterestsStr] = useState('');
   const [showProgram, setShowProgram] = useState(true);
   const [allowConns, setAllowConns] = useState(true);
 
+  // Staff Verification state (self only)
+  const [staffStatus, setStaffStatus] = useState<StaffVerificationStatus>('not_requested');
+  const [latestStaffReq, setLatestStaffReq] = useState<StaffVerificationRequest | null>(null);
+  const [staffPosition, setStaffPosition] = useState('Lecturer');
+  const [staffDepartment, setStaffDepartment] = useState('');
+  const [staffDesignation, setStaffDesignation] = useState('');
+  const [staffNotes, setStaffNotes] = useState('');
+  const [staffEvidence, setStaffEvidence] = useState<File | null>(null);
+  const [submittingStaff, setSubmittingStaff] = useState(false);
+  const [showStaffForm, setShowStaffForm] = useState(false);
+
   const targetUsername = username || user?.username;
+  const isSelf = Boolean(user && profile && user.id === profile.id);
 
   const load = useCallback(async () => {
     if (!targetUsername) return;
@@ -426,6 +458,19 @@ export function ProfileView({ username }: { username?: string }) {
     setResources(data.resources);
   }, [targetUsername]);
 
+  const loadStaffVerification = useCallback(async () => {
+    if (!user) return;
+    try {
+      const data = await api.get<{ status: StaffVerificationStatus; latestRequest: StaffVerificationRequest | null }>(
+        '/api/auth/staff-verification'
+      );
+      setStaffStatus(data.status);
+      setLatestStaffReq(data.latestRequest);
+    } catch {
+      // ignore if endpoint unavailable before migration
+    }
+  }, [user]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -434,13 +479,16 @@ export function ProfileView({ username }: { username?: string }) {
     if (user && (!username || username === user.username)) {
       setDisplayName(user.display_name);
       setBio(user.bio);
+      setDepartment(user.department || '');
+      setStudentId(user.student_id || '');
       setProgramId(user.program_id || '');
       setSemesterId(user.semester_id || '');
       setInterestsStr(user.interests.join(', '));
       setShowProgram(user.privacy_settings.show_program);
       setAllowConns(user.privacy_settings.allow_connection_requests);
+      void loadStaffVerification();
     }
-  }, [user, username]);
+  }, [user, username, loadStaffVerification]);
 
   if (!targetUsername) {
     return (
@@ -458,22 +506,29 @@ export function ProfileView({ username }: { username?: string }) {
     return <div className="h-40 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 animate-pulse" />;
   }
 
-  const isSelf = user?.id === profile.id;
-
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    await api.patch('/api/auth/profile', {
-      display_name: displayName,
-      bio,
-      program_id: programId || null,
-      semester_id: semesterId || null,
-      interests: interestsStr.split(',').map((s) => s.trim()).filter(Boolean),
-      privacy_settings: { show_program: showProgram, allow_connection_requests: allowConns },
-    });
-    await refreshUser();
-    await load();
-    setEditing(false);
-    notify('Profile updated.', 'success');
+    setSavingProfile(true);
+    try {
+      await api.patch('/api/auth/profile', {
+        display_name: displayName,
+        bio,
+        department: department.trim() || null,
+        student_id: studentId.trim() || null,
+        program_id: programId || null,
+        semester_id: semesterId || null,
+        interests: interestsStr.split(',').map((s) => s.trim()).filter(Boolean),
+        privacy_settings: { show_program: showProgram, allow_connection_requests: allowConns },
+      });
+      await refreshUser();
+      await load();
+      setEditing(false);
+      notify('Profile updated.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to save profile.', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
   }
 
   async function handleAvatarUpload(file: File | undefined) {
@@ -489,6 +544,59 @@ export function ProfileView({ username }: { username?: string }) {
       notify(err instanceof Error ? err.message : 'Avatar upload failed.', 'error');
     }
   }
+
+  async function handleStaffVerificationSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmittingStaff(true);
+    try {
+      const fd = new FormData();
+      fd.append('position', staffPosition);
+      fd.append('department', staffDepartment.trim());
+      fd.append('designation', staffDesignation.trim());
+      fd.append('supporting_notes', staffNotes.trim());
+      if (staffEvidence) {
+        fd.append('evidence', staffEvidence);
+      }
+      await api.upload('/api/auth/staff-verification', fd);
+      await Promise.all([loadStaffVerification(), refreshUser()]);
+      setShowStaffForm(false);
+      setStaffNotes('');
+      setStaffEvidence(null);
+      notify('University staff verification request submitted for administrator review.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not submit verification request.', 'error');
+    } finally {
+      setSubmittingStaff(false);
+    }
+  }
+
+  const canRequestStaffVerification =
+    isSelf && user && !['verified_teacher', 'admin', 'super_admin', 'community_moderator'].includes(user.role);
+
+  const statusBadge = (() => {
+    if (user?.role === 'verified_teacher' || staffStatus === 'approved') {
+      return {
+        label: 'Approved — Verified University Staff',
+        cls: 'border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300',
+      };
+    }
+    if (staffStatus === 'pending') {
+      return {
+        label: 'Pending Administrator Review',
+        cls: 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300',
+      };
+    }
+    if (staffStatus === 'rejected') {
+      return {
+        label: 'Rejected — Update & Re-submit',
+        cls: 'border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-300',
+      };
+    }
+    return {
+      label: 'Not Requested',
+      cls: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300',
+    };
+  })();
 
   return (
     <div className="space-y-5">
@@ -513,9 +621,19 @@ export function ProfileView({ username }: { username?: string }) {
                 @{profile.username} · {formatRoleLabel(profile.role)}
                 {profile.university_email_verified ? ' · University Verified' : ''}
               </div>
+              {(profile.department || profile.designation || profile.staff_position) && (
+                <div className="text-xs text-slate-600 dark:text-slate-300">
+                  {[profile.designation || profile.staff_position, profile.department].filter(Boolean).join(' · ')}
+                </div>
+              )}
               {profile.program_name && (
                 <div className="text-xs text-slate-600 dark:text-slate-300">
                   {profile.program_name} {profile.semester_name ? `· ${profile.semester_name}` : ''}
+                </div>
+              )}
+              {isSelf && user?.student_id && (
+                <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                  Student ID: {user.student_id}
                 </div>
               )}
               <div className="text-[11px] font-mono text-slate-400">
@@ -541,6 +659,37 @@ export function ProfileView({ username }: { username?: string }) {
           )}
         </div>
 
+        {isSelf && user && (
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium text-slate-700 dark:text-slate-300">
+                {user.profile_completed ? 'Profile Complete' : 'Profile Completion'}
+              </span>
+              <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-white">
+                {user.profile_completion_pct}%
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-sm bg-slate-200 dark:bg-slate-800 overflow-hidden">
+              <div
+                className={`h-full transition-all ${user.profile_completed ? 'bg-emerald-600' : 'bg-blue-600'}`}
+                style={{ width: `${Math.min(100, Math.max(0, user.profile_completion_pct))}%` }}
+              />
+            </div>
+            {!user.profile_completed && !editing && (
+              <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                <span>Add your department, program, semester, bio, or interests when convenient.</span>
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="font-medium text-blue-700 dark:text-blue-400 hover:underline shrink-0"
+                >
+                  Complete now
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {profile.bio && <p className="text-sm text-slate-700 dark:text-slate-300">{profile.bio}</p>}
         {profile.interests.length > 0 && (
           <p className="text-xs text-slate-500">Interests: {profile.interests.join(' · ')}</p>
@@ -551,17 +700,39 @@ export function ProfileView({ username }: { username?: string }) {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-medium mb-1">Display Name</label>
-                <input type="text" required value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm" />
+                <input
+                  type="text"
+                  required
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                />
               </div>
               <div>
-                <label className="block text-xs font-medium mb-1">Interests (comma separated)</label>
-                <input type="text" value={interestsStr} onChange={(e) => setInterestsStr(e.target.value)} className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm" />
+                <label className="block text-xs font-medium mb-1">Department (Optional)</label>
+                <input
+                  type="text"
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  placeholder="e.g. School of Information Technology"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                />
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-medium mb-1">Program</label>
-                <select value={programId} onChange={(e) => setProgramId(e.target.value)} className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm">
+                <label className="block text-xs font-medium mb-1">Program (Optional)</label>
+                <select
+                  value={programId}
+                  onChange={(e) => {
+                    const nextProg = e.target.value;
+                    setProgramId(nextProg);
+                    if (!structure.semesters.some((s) => s.program_id === nextProg && s.id === semesterId)) {
+                      setSemesterId('');
+                    }
+                  }}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                >
                   <option value="">None</option>
                   {structure.programs.map((p) => (
                     <option key={p.id} value={p.id}>{p.code} — {p.name}</option>
@@ -569,8 +740,13 @@ export function ProfileView({ username }: { username?: string }) {
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium mb-1">Semester</label>
-                <select value={semesterId} onChange={(e) => setSemesterId(e.target.value)} className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm">
+                <label className="block text-xs font-medium mb-1">Semester (Optional)</label>
+                <select
+                  value={semesterId}
+                  onChange={(e) => setSemesterId(e.target.value)}
+                  disabled={!programId}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm disabled:opacity-50"
+                >
                   <option value="">None</option>
                   {structure.semesters.filter((s) => s.program_id === programId).map((s) => (
                     <option key={s.id} value={s.id}>{s.name}</option>
@@ -578,9 +754,37 @@ export function ProfileView({ username }: { username?: string }) {
                 </select>
               </div>
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium mb-1">Student ID (Private, Optional)</label>
+                <input
+                  type="text"
+                  value={studentId}
+                  onChange={(e) => setStudentId(e.target.value)}
+                  placeholder="e.g. GU-BIT-2081-014"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1">Interests (comma separated)</label>
+                <input
+                  type="text"
+                  value={interestsStr}
+                  onChange={(e) => setInterestsStr(e.target.value)}
+                  placeholder="AI, Web Engineering, Research"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
             <div>
               <label className="block text-xs font-medium mb-1">Biography</label>
-              <textarea rows={2} value={bio} onChange={(e) => setBio(e.target.value)} className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm" />
+              <textarea
+                rows={2}
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+                placeholder="Share your academic focus or campus involvement"
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+              />
             </div>
             <div className="flex flex-wrap gap-4 text-xs">
               <label className="inline-flex items-center gap-2">
@@ -592,12 +796,172 @@ export function ProfileView({ username }: { username?: string }) {
                 Accept connection requests
               </label>
             </div>
-            <button type="submit" className="px-4 py-2 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium">
-              Save Profile Settings
+            <button
+              type="submit"
+              disabled={savingProfile}
+              className="px-4 py-2 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium disabled:opacity-50"
+            >
+              {savingProfile ? 'Saving...' : 'Save Profile Settings'}
             </button>
           </form>
         )}
       </section>
+
+      {isSelf && user && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                <BadgeCheck className="w-4 h-4 text-blue-700 dark:text-blue-400" />
+                University Staff Verification
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Faculty and university staff can apply for verified status. Administrator approval is required before staff privileges are granted.
+              </p>
+            </div>
+            <div className={`px-2.5 py-1 rounded-md border text-xs font-medium shrink-0 ${statusBadge.cls}`}>
+              {statusBadge.label}
+            </div>
+          </div>
+
+          {latestStaffReq && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3.5 text-xs space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-900 dark:text-slate-100">
+                  {latestStaffReq.position} — {latestStaffReq.designation} ({latestStaffReq.department})
+                </span>
+                <span className="font-mono text-[11px] text-slate-500">
+                  Submitted {new Date(latestStaffReq.created_at).toLocaleDateString()}
+                </span>
+              </div>
+              {latestStaffReq.evidence_original_filename && (
+                <div className="text-slate-500 dark:text-slate-400">
+                  Supporting document: <span className="font-mono">{latestStaffReq.evidence_original_filename}</span>
+                </div>
+              )}
+              {latestStaffReq.review_notes && (
+                <div className="text-slate-600 dark:text-slate-300 pt-1 border-t border-slate-200 dark:border-slate-800">
+                  <strong>Reviewer Notes:</strong> {latestStaffReq.review_notes}
+                </div>
+              )}
+            </div>
+          )}
+
+          {canRequestStaffVerification && staffStatus !== 'pending' && (
+            showStaffForm ? (
+              <form onSubmit={handleStaffVerificationSubmit} className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Position</label>
+                    <select
+                      value={staffPosition}
+                      onChange={(e) => setStaffPosition(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                    >
+                      {STAFF_POSITIONS.map((pos) => (
+                        <option key={pos} value={pos}>{pos}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">University Email</label>
+                    <input
+                      type="email"
+                      readOnly
+                      value={user.email}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950/70 px-3 py-2 text-sm text-slate-500 dark:text-slate-400 cursor-not-allowed"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Department</label>
+                    <input
+                      type="text"
+                      required
+                      value={staffDepartment}
+                      onChange={(e) => setStaffDepartment(e.target.value)}
+                      placeholder="e.g. Faculty of Science & Technology"
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Designation</label>
+                    <input
+                      type="text"
+                      required
+                      value={staffDesignation}
+                      onChange={(e) => setStaffDesignation(e.target.value)}
+                      placeholder="e.g. Assistant Professor of Computer Science"
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Supporting Notes (Optional)</label>
+                  <textarea
+                    rows={2}
+                    value={staffNotes}
+                    onChange={(e) => setStaffNotes(e.target.value)}
+                    placeholder="Provide faculty ID reference, courses taught, or office details to assist verification"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Supporting Document (Optional, PDF/PNG/JPG up to 5 MB, stored privately)</label>
+                  <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                    <FileUp className="w-4 h-4 shrink-0" />
+                    <span className="truncate">{staffEvidence ? staffEvidence.name : 'Choose university ID card or appointment letter (optional)'}</span>
+                    <input
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                      className="hidden"
+                      onChange={(e) => setStaffEvidence(e.target.files?.[0] || null)}
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="submit"
+                    disabled={submittingStaff}
+                    className="px-4 py-2 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium disabled:opacity-50"
+                  >
+                    {submittingStaff ? 'Submitting Request...' : 'Submit Verification Request'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowStaffForm(false)}
+                    className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStaffDepartment((prev) => prev || user.department || '');
+                    setShowStaffForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <BadgeCheck className="w-4 h-4 text-blue-700 dark:text-blue-400" />
+                  Request University Staff Verification
+                </button>
+              </div>
+            )
+          )}
+
+          {canRequestStaffVerification && staffStatus === 'pending' && (
+            <div className="inline-flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400">
+              <Clock className="w-4 h-4" />
+              Your staff verification request is queued for administrator approval.
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">

@@ -24,6 +24,7 @@ import {
   ProfileView,
 } from './components/social/SocialViews.tsx';
 import { AdminDashboard } from './components/admin/AdminDashboard.tsx';
+import { AdminLoginHub } from './components/auth/AdminLoginHub.tsx';
 
 function MainRouter() {
   const { route } = useApp();
@@ -68,14 +69,48 @@ function MainRouter() {
   }
 }
 
-export default function App() {
+function AppContent() {
+  const { route, toasts } = useApp();
+
+  if (route.page === 'admin-login-hub') {
+    return (
+      <>
+        <AdminLoginHub />
+        <div className="fixed bottom-5 right-4 z-50 space-y-2 max-w-sm">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className={`px-4 py-2.5 rounded-lg border text-xs font-medium shadow-lg ${
+                t.tone === 'error'
+                  ? 'bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-800 text-red-900 dark:text-red-100'
+                  : t.tone === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-100'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+              }`}
+            >
+              {t.text}
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
+
   return (
-    <AppProvider>
+    <>
       <AppShell>
         <MainRouter />
       </AppShell>
       <AuthModal />
       <PolicyModal />
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <AppProvider>
+      <AppContent />
     </AppProvider>
   );
 }

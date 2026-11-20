@@ -31,6 +31,53 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
     [userId]
   );
 
+  let staffVerificationStatus: AuthUser['staff_verification_status'] =
+    row.role === 'verified_teacher' ? 'approved' : 'not_requested';
+  try {
+    const tableCheck = await db.queryOne<{ exists: string | null }>(
+      "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+    );
+    if (tableCheck?.exists) {
+      const latestReq = await db.queryOne<{ status: string }>(
+        `SELECT status FROM staff_verification_requests
+         WHERE user_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId]
+      );
+      if (row.role === 'verified_teacher') {
+        staffVerificationStatus = 'approved';
+      } else if (latestReq?.status === 'pending' || latestReq?.status === 'approved' || latestReq?.status === 'rejected') {
+        staffVerificationStatus = latestReq.status;
+      }
+    }
+  } catch {
+    // Graceful fallback if 003 migration is pending in production
+  }
+
+  const role = row.role as UserRole;
+  const hasAcademic = Boolean(row.program_id && row.semester_id);
+  const hasStaffInfo = Boolean(row.staff_position && row.department);
+  const hasBio = Boolean(String(row.bio || '').trim().length > 0);
+  const hasAvatar = Boolean(row.avatar_url);
+  const hasInterests = Array.isArray(row.interests) && row.interests.length > 0;
+  const hasDeptOrId = Boolean(row.department || row.student_id);
+
+  let completionPct = 25; // Base: verified name + university email
+  if (hasAcademic || hasStaffInfo) completionPct += 35;
+  else if (row.program_id || hasDeptOrId) completionPct += 15;
+  if (hasBio) completionPct += 15;
+  if (hasInterests) completionPct += 15;
+  if (hasAvatar) completionPct += 10;
+  completionPct = Math.min(100, completionPct);
+
+  const profileCompleted =
+    Boolean(row.profile_completed) ||
+    hasAcademic ||
+    hasStaffInfo ||
+    role === 'super_admin' ||
+    role === 'admin' ||
+    role === 'verified_teacher';
+
   return {
     id: String(row.id),
     email: String(row.email),
@@ -38,7 +85,7 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
     display_name: String(row.display_name),
     avatar_url: row.avatar_url ? String(row.avatar_url) : null,
     bio: String(row.bio || ''),
-    role: row.role as UserRole,
+    role,
     email_verified: Boolean(row.email_verified),
     university_email_verified: Boolean(row.university_email_verified),
     external_reason: (row.external_reason as AuthUser['external_reason']) || null,
@@ -47,6 +94,13 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
     program_name: row.program_name ? String(row.program_name) : null,
     semester_id: row.semester_id ? String(row.semester_id) : null,
     semester_name: row.semester_name ? String(row.semester_name) : null,
+    department: row.department ? String(row.department) : null,
+    student_id: row.student_id ? String(row.student_id) : null,
+    staff_position: row.staff_position ? String(row.staff_position) : null,
+    designation: row.designation ? String(row.designation) : null,
+    profile_completed: profileCompleted,
+    profile_completion_pct: completionPct,
+    staff_verification_status: staffVerificationStatus,
     interests: Array.isArray(row.interests) ? (row.interests as string[]) : [],
     notification_prefs:
       (row.notification_prefs as AuthUser['notification_prefs']) || {

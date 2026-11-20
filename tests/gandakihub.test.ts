@@ -102,26 +102,17 @@ let futureCommId = '';
 
 async function registerAndVerify(params: {
   email: string;
-  username: string;
-  display_name: string;
-  category: 'university_member' | 'external';
-  member_type?: 'student' | 'teacher';
-  external_reason?: 'future_student' | 'university_visitor' | 'alumni' | 'platform_admin' | 'other';
-  external_reason_detail?: string;
+  full_name: string;
+  password?: string;
 }) {
+  const password = params.password || 'Password123';
   const reg = await req('/api/auth/register', {
     method: 'POST',
     json: {
+      full_name: params.full_name,
       email: params.email,
-      password: 'Password123',
-      username: params.username,
-      display_name: params.display_name,
-      category: params.category,
-      member_type: params.member_type || 'student',
-      program_id: params.category === 'university_member' ? bitProgramId : null,
-      semester_id: params.category === 'university_member' && (params.member_type || 'student') === 'student' ? bitSem1Id : null,
-      external_reason: params.external_reason ?? null,
-      external_reason_detail: params.external_reason_detail ?? null,
+      password,
+      confirm_password: password,
     },
   });
   expect(reg.status).toBe(201);
@@ -145,6 +136,7 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
   let modCookie = '';
   let studentCookie = '';
   let studentId = '';
+  let studentUsername = '';
   let otherStudentCookie = '';
   let visitorCookie = '';
   let futureCookie = '';
@@ -155,11 +147,16 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
     delete process.env.SUPER_ADMIN_EMAIL;
 
     pglite = new PGlite({ extensions: { pg_trgm } });
-    const migrationSql = fs.readFileSync(
+    const migration002 = fs.readFileSync(
       path.resolve(process.cwd(), 'supabase', 'migrations', '002_complete_production_schema.sql'),
       'utf8'
     );
-    await pglite.exec(migrationSql);
+    const migration003 = fs.readFileSync(
+      path.resolve(process.cwd(), 'supabase', 'migrations', '003_profile_completion_staff_verification.sql'),
+      'utf8'
+    );
+    await pglite.exec(migration002);
+    await pglite.exec(migration003);
 
     db = createPGliteDatabase(pglite);
     await seedIfEmpty(db);
@@ -224,104 +221,119 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       expect(resources.status).toBe(200);
       expect(resources.data.resources.length).toBe(0);
 
-      // With SUPER_ADMIN_EMAIL unset, bootstrap-status exposes explicit configurationError and blocks platform_admin claim
+      // Public bootstrap-status is intentionally not exposed
       const bootstrapMissing = await req('/api/auth/bootstrap-status');
-      expect(bootstrapMissing.status).toBe(200);
-      expect(bootstrapMissing.data.needsSuperAdmin).toBe(true);
-      expect(bootstrapMissing.data.superAdminEmailConfigured).toBe(false);
-      expect(String(bootstrapMissing.data.configurationError || '')).toContain('SUPER_ADMIN_EMAIL');
+      expect(bootstrapMissing.status).toBe(404);
 
       const blockedMissingEnv = await req('/api/auth/register', {
         method: 'POST',
         json: {
+          full_name: 'Unconfigured Admin',
           email: 'snikunj769@gmail.com',
           password: 'Password123',
-          username: 'unconfigured_admin',
-          display_name: 'Unconfigured Admin',
-          category: 'external',
-          external_reason: 'platform_admin',
+          confirm_password: 'Password123',
         },
       });
-      expect(blockedMissingEnv.status).toBe(503);
+      expect(blockedMissingEnv.status).toBe(400);
     });
   });
 
-  describe('1. Authentication, Atomic Super Admin Bootstrap & OTP Lifecycle', () => {
-    it('bootstraps the configured SUPER_ADMIN_EMAIL once atomically and prevents subsequent claims', async () => {
+  describe('1. Simplified Registration, Super Admin Bootstrap, Admin Login Portal & OTP Lifecycle', () => {
+    it('bootstraps SUPER_ADMIN_EMAIL atomically once, ignores injected role fields, and enforces /api/auth/admin-login', async () => {
       process.env.SUPER_ADMIN_EMAIL = 'snikunj769@gmail.com';
 
-      const bootstrapReady = await req('/api/auth/bootstrap-status');
-      expect(bootstrapReady.status).toBe(200);
-      expect(bootstrapReady.data.needsSuperAdmin).toBe(true);
-      expect(bootstrapReady.data.superAdminEmailConfigured).toBe(true);
-      expect(bootstrapReady.data.configurationError).toBeNull();
-
-      // Rejects unauthorized email claiming platform_admin
+      // Rejects non-university email even if trying external address
       const unauthorizedClaim = await req('/api/auth/register', {
         method: 'POST',
         json: {
+          full_name: 'Unauth Admin',
           email: 'unauthorized@gmail.com',
           password: 'Password123',
-          username: 'unauth_admin',
-          display_name: 'Unauth Admin',
-          category: 'external',
-          external_reason: 'platform_admin',
+          confirm_password: 'Password123',
         },
       });
-      expect(unauthorizedClaim.status).toBe(403);
+      expect(unauthorizedClaim.status).toBe(400);
 
       // Register & verify the configured SUPER_ADMIN_EMAIL
       const superAcc = await registerAndVerify({
         email: 'snikunj769@gmail.com',
-        username: 'platform_owner',
-        display_name: 'Nikunj Super Admin',
-        category: 'external',
-        external_reason: 'platform_admin',
+        full_name: 'Nikunj Super Admin',
       });
       expect(superAcc.user.role).toBe('super_admin');
       superCookie = superAcc.cookie;
 
-      const bootstrapAfter = await req('/api/auth/bootstrap-status');
-      expect(bootstrapAfter.data.needsSuperAdmin).toBe(false);
-
-      // Re-claiming platform_admin after bootstrap is forbidden
+      // Re-claiming super_admin after bootstrap via external email is rejected
       const repeatPlatformAdmin = await req('/api/auth/register', {
         method: 'POST',
         json: {
+          full_name: 'Second Admin',
           email: 'second@gmail.com',
           password: 'Password123',
-          username: 'second_admin',
-          display_name: 'Second Admin',
-          category: 'external',
-          external_reason: 'platform_admin',
+          confirm_password: 'Password123',
         },
       });
-      expect(repeatPlatformAdmin.status).toBe(403);
+      expect(repeatPlatformAdmin.status).toBe(400);
 
-      // Register a teacher & promote to admin
-      const secondAcc = await registerAndVerify({
-        email: 'admin_candidate@gandakiuniversity.edu.np',
-        username: 'campus_admin',
-        display_name: 'Campus Admin',
-        category: 'university_member',
-        member_type: 'teacher',
+      // Register an ordinary member (even if client injects role='super_admin' or 'verified_teacher', server assigns 'verified_student')
+      const injectedAttempt = await req('/api/auth/register', {
+        method: 'POST',
+        json: {
+          full_name: 'Campus Admin',
+          email: 'admin_candidate@gandakiuniversity.edu.np',
+          password: 'Password123',
+          confirm_password: 'Password123',
+          role: 'verified_teacher',
+        },
       });
-      expect(secondAcc.user.role).toBe('verified_teacher');
-      adminCookie = secondAcc.cookie;
+      expect(injectedAttempt.status).toBe(201);
+      const adminCandidateVer = await req('/api/auth/verify-otp', {
+        method: 'POST',
+        json: {
+          email: 'admin_candidate@gandakiuniversity.edu.np',
+          code: injectedAttempt.data.devOtpPreview,
+          purpose: 'verify_email',
+        },
+      });
+      expect(adminCandidateVer.status).toBe(200);
+      expect(adminCandidateVer.data.user.role).toBe('verified_student');
 
-      const promoteAdmin = await req(`/api/admin/users/${secondAcc.user.id}/role`, {
+      // Super Admin promotes admin_candidate to 'admin'
+      const promoteAdmin = await req(`/api/admin/users/${adminCandidateVer.data.user.id}/role`, {
         method: 'PATCH',
         cookie: superCookie,
         json: { role: 'admin' },
       });
       expect(promoteAdmin.status).toBe(200);
 
+      // Admin signs in through the dedicated /api/auth/admin-login portal
+      const adminPortalLogin = await req('/api/auth/admin-login', {
+        method: 'POST',
+        json: { email: 'admin_candidate@gandakiuniversity.edu.np', password: 'Password123' },
+      });
+      expect(adminPortalLogin.status).toBe(200);
+      expect(adminPortalLogin.data.user.role).toBe('admin');
+      adminCookie = adminPortalLogin.cookie;
+
+      // Super Admin can also sign in through /api/auth/admin-login without any role selector
+      const superPortalLogin = await req('/api/auth/admin-login', {
+        method: 'POST',
+        json: { email: 'snikunj769@gmail.com', password: 'Password123' },
+      });
+      expect(superPortalLogin.status).toBe(200);
+      expect(superPortalLogin.data.user.role).toBe('super_admin');
+
+      // Bad credentials on /api/auth/admin-login return uniform 401
+      const badPortalLogin = await req('/api/auth/admin-login', {
+        method: 'POST',
+        json: { email: 'nonexistent_admin@gandakiuniversity.edu.np', password: 'WrongPassword1' },
+      });
+      expect(badPortalLogin.status).toBe(401);
+      expect(badPortalLogin.data.error).toBe('Invalid credentials.');
+
       // Register moderator & peer student
       const modAcc = await registerAndVerify({
         email: 'mod@gandakiuniversity.edu.np',
-        username: 'bit_mod',
-        display_name: 'BIT Moderator',
-        category: 'university_member',
+        full_name: 'BIT Moderator',
       });
       modCookie = modAcc.cookie;
       const promoteMod = await req(`/api/admin/users/${modAcc.user.id}/role`, {
@@ -333,40 +345,43 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
 
       const otherAcc = await registerAndVerify({
         email: 'peer@gandakiuniversity.edu.np',
-        username: 'peer_student',
-        display_name: 'Peer Student',
-        category: 'university_member',
+        full_name: 'Peer Student',
       });
       otherStudentCookie = otherAcc.cookie;
     });
 
-    it('rejects non-university email when registering as university member', async () => {
-      const r = await req('/api/auth/register', {
+    it('rejects password mismatch and non-university email during registration', async () => {
+      const mismatch = await req('/api/auth/register', {
         method: 'POST',
         json: {
-          email: 'fake@gmail.com',
+          full_name: 'Mismatch User',
+          email: 'mismatch@gandakiuniversity.edu.np',
           password: 'Password123',
-          username: 'fake_uni',
-          display_name: 'Fake Uni',
-          category: 'university_member',
-          member_type: 'student',
+          confirm_password: 'Password999',
         },
       });
-      expect(r.status).toBe(400);
+      expect(mismatch.status).toBe(400);
+
+      const nonUni = await req('/api/auth/register', {
+        method: 'POST',
+        json: {
+          full_name: 'Fake Uni',
+          email: 'fake@gmail.com',
+          password: 'Password123',
+          confirm_password: 'Password123',
+        },
+      });
+      expect(nonUni.status).toBe(400);
     });
 
-    it('verifies 6-digit OTP, enforces attempt lockout, invalidates old sessions on password reset, and enforces 1-email-1-user', async () => {
+    it('verifies 6-digit OTP into direct login, blocks non-admin on admin-login (403), invalidates sessions on reset, and enforces 1-email-1-user', async () => {
       const reg = await req('/api/auth/register', {
         method: 'POST',
         json: {
+          full_name: 'Anita Gurung',
           email: 'anita@gandakiuniversity.edu.np',
           password: 'Password123',
-          username: 'anita_bit',
-          display_name: 'Anita Gurung',
-          category: 'university_member',
-          member_type: 'student',
-          program_id: bitProgramId,
-          semester_id: bitSem1Id,
+          confirm_password: 'Password123',
         },
       });
       expect(reg.status).toBe(201);
@@ -390,9 +405,19 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       expect(verify.status).toBe(200);
       expect(verify.data.user.role).toBe('verified_student');
       expect(verify.data.user.university_email_verified).toBe(true);
+      expect(verify.data.user.profile_completed).toBe(false);
       expect(typeof verify.data.sessionToken).toBe('string');
       studentCookie = verify.cookie;
       studentId = verify.data.user.id;
+      studentUsername = verify.data.user.username;
+
+      // Non-admin verified student is denied at /api/auth/admin-login with 403
+      const studentAdminPortal = await req('/api/auth/admin-login', {
+        method: 'POST',
+        json: { email: 'anita@gandakiuniversity.edu.np', password: 'Password123' },
+      });
+      expect(studentAdminPortal.status).toBe(403);
+      expect(studentAdminPortal.data.error).toBe('You are not authorized to access the administrator portal.');
 
       // Verify Bearer token fallback authenticates /api/auth/me even without cookies
       const meBearer = await req('/api/auth/me', { token: verify.data.sessionToken });
@@ -416,11 +441,10 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       const dup = await req('/api/auth/register', {
         method: 'POST',
         json: {
+          full_name: 'Anita Dup',
           email: 'Anita@GandakiUniversity.edu.np',
           password: 'Password123',
-          username: 'anita_dup',
-          display_name: 'Anita Dup',
-          category: 'university_member',
+          confirm_password: 'Password123',
         },
       });
       expect(dup.status).toBe(409);
@@ -454,40 +478,38 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       studentCookie = freshLogin.cookie;
     });
 
-    it('requires explanation when external user selects "other" and verifies visitor/future_student roles', async () => {
-      const bad = await req('/api/auth/register', {
-        method: 'POST',
-        json: {
-          email: 'ext1@example.com',
-          password: 'Password123',
-          username: 'ext_one',
-          display_name: 'Ext One',
-          category: 'external',
-          external_reason: 'other',
-        },
-      });
-      expect(bad.status).toBe(400);
-
+    it('supports future_student and visitor RBAC levels when assigned by administrators', async () => {
       const futureAcc = await registerAndVerify({
-        email: 'future@example.com',
-        username: 'future_applicant',
-        display_name: 'Prospective Student',
-        category: 'external',
-        external_reason: 'future_student',
+        email: 'future@gandakiuniversity.edu.np',
+        full_name: 'Prospective Student',
       });
-      expect(futureAcc.user.role).toBe('future_student');
-      expect(futureAcc.user.university_email_verified).toBe(false);
-      futureCookie = futureAcc.cookie;
+      await req(`/api/admin/users/${futureAcc.user.id}/role`, {
+        method: 'PATCH',
+        cookie: superCookie,
+        json: { role: 'future_student' },
+      });
+      const futureLogin = await req('/api/auth/login', {
+        method: 'POST',
+        json: { identifier: 'future@gandakiuniversity.edu.np', password: 'Password123' },
+      });
+      expect(futureLogin.data.user.role).toBe('future_student');
+      futureCookie = futureLogin.cookie;
 
       const visitorAcc = await registerAndVerify({
-        email: 'visitor@example.com',
-        username: 'campus_visitor',
-        display_name: 'Campus Visitor',
-        category: 'external',
-        external_reason: 'university_visitor',
+        email: 'visitor@gandakiuniversity.edu.np',
+        full_name: 'Campus Visitor',
       });
-      expect(visitorAcc.user.role).toBe('visitor');
-      visitorCookie = visitorAcc.cookie;
+      await req(`/api/admin/users/${visitorAcc.user.id}/role`, {
+        method: 'PATCH',
+        cookie: superCookie,
+        json: { role: 'visitor' },
+      });
+      const visitorLogin = await req('/api/auth/login', {
+        method: 'POST',
+        json: { identifier: 'visitor@gandakiuniversity.edu.np', password: 'Password123' },
+      });
+      expect(visitorLogin.data.user.role).toBe('visitor');
+      visitorCookie = visitorLogin.cookie;
     });
   });
 
@@ -780,7 +802,7 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
         json: { reason: 'Critical safety investigation verification' },
       });
       expect(superVault.status).toBe(200);
-      expect(superVault.data.identity.username).toBe('anita_bit');
+      expect(superVault.data.identity.username).toBe(studentUsername);
     });
 
     it('detects English, Romanized Nepali, and Devanagari profanity while avoiding academic false positives', () => {
@@ -1023,6 +1045,112 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
         json: { community_id: bitCommId },
       });
       expect(emptyPost.status).toBe(400);
+    });
+  });
+
+  describe('8. Post-Registration Profile Completion & University Staff Verification Workflow', () => {
+    it('saves voluntary student profile details and updates profile_completed + completion percentage', async () => {
+      const patchRes = await req('/api/auth/profile', {
+        method: 'PATCH',
+        cookie: studentCookie,
+        json: {
+          department: 'School of Information Technology',
+          program_id: bitProgramId,
+          semester_id: bitSem1Id,
+          student_id: 'GU-BIT-2081-014',
+          bio: 'BIT undergraduate focused on distributed systems.',
+          interests: ['Databases', 'Cybersecurity'],
+        },
+      });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.data.user.department).toBe('School of Information Technology');
+      expect(patchRes.data.user.student_id).toBe('GU-BIT-2081-014');
+      expect(patchRes.data.user.profile_completed).toBe(true);
+      expect(patchRes.data.user.profile_completion_pct).toBe(90);
+
+      // Public profile view exposes student_id only to self
+      const otherView = await req(`/api/auth/users/${encodeURIComponent(studentUsername)}`, {
+        cookie: otherStudentCookie,
+      });
+      expect(otherView.status).toBe(200);
+      expect(otherView.data.profile.student_id).toBeNull();
+    });
+
+    it('keeps staff verification requests pending without auto-elevating role until approved by admin', async () => {
+      const facultyAcc = await registerAndVerify({
+        email: 'faculty.applicant@gandakiuniversity.edu.np',
+        full_name: 'Dr. Hari Adhikari',
+      });
+      expect(facultyAcc.user.role).toBe('verified_student');
+
+      const pngBytes = Buffer.from(
+        '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
+        'hex'
+      );
+      const fd = new FormData();
+      fd.append('position', 'Assistant Professor');
+      fd.append('department', 'School of Science & Technology');
+      fd.append('designation', 'Assistant Professor of AI');
+      fd.append('supporting_notes', 'Faculty ID GU-FAC-204');
+      fd.append('evidence', new Blob([new Uint8Array(pngBytes)], { type: 'image/png' }), 'faculty-id.png');
+
+      const submitRes = await req('/api/auth/staff-verification', {
+        method: 'POST',
+        cookie: facultyAcc.cookie,
+        formData: fd,
+      });
+      expect(submitRes.status).toBe(201);
+      expect(submitRes.data.request.status).toBe('pending');
+      expect(submitRes.data.request.has_evidence).toBe(true);
+
+      // Role must NOT be elevated automatically
+      const meBefore = await req('/api/auth/me', { cookie: facultyAcc.cookie });
+      expect(meBefore.data.user.role).toBe('verified_student');
+      expect(meBefore.data.user.staff_verification_status).toBe('pending');
+
+      const requestId = submitRes.data.request.id as string;
+
+      // Non-admin cannot approve their own or anyone's staff request
+      const selfApprove = await req(`/api/admin/staff-verification/${requestId}/review`, {
+        method: 'POST',
+        cookie: facultyAcc.cookie,
+        json: { decision: 'approved' },
+      });
+      expect(selfApprove.status).toBe(403);
+
+      // Non-admin cannot fetch private verification evidence
+      const studentEvidence = await req(`/api/admin/staff-verification/${requestId}/evidence`, {
+        cookie: studentCookie,
+      });
+      expect(studentEvidence.status).toBe(403);
+
+      // Admin can list, inspect private evidence, and approve staff request
+      const listRes = await req('/api/admin/staff-verification?status=pending', { cookie: adminCookie });
+      expect(listRes.status).toBe(200);
+      expect((listRes.data.requests as Array<{ id: string }>).some((r) => r.id === requestId)).toBe(true);
+
+      const evFetch = await fetch(`${baseUrl}/api/admin/staff-verification/${requestId}/evidence`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(evFetch.status).toBe(200);
+      expect(evFetch.headers.get('content-type')).toContain('image/png');
+
+      const approveRes = await req(`/api/admin/staff-verification/${requestId}/review`, {
+        method: 'POST',
+        cookie: adminCookie,
+        json: { decision: 'approved', review_notes: 'Verified against university faculty directory.' },
+      });
+      expect(approveRes.status).toBe(200);
+
+      const meAfter = await req('/api/auth/me', { cookie: facultyAcc.cookie });
+      expect(meAfter.data.user.role).toBe('verified_teacher');
+      expect(meAfter.data.user.staff_verification_status).toBe('approved');
+      expect(meAfter.data.user.staff_position).toBe('Assistant Professor');
+      expect(meAfter.data.user.designation).toBe('Assistant Professor of AI');
+
+      // Audit log recorded staff_verification_approved
+      const audits = await req('/api/admin/audit-logs', { cookie: adminCookie });
+      expect((audits.data.logs as Array<{ action: string }>).some((l) => l.action === 'staff_verification_approved')).toBe(true);
     });
   });
 });

@@ -111,7 +111,7 @@ export function createSpecialRouter(db: AppDatabase): Router {
           [id, req.user!.id]
         );
 
-        await syncModerationQueue(tx, 'confession', id, req.user!.id, 'pending');
+        await syncModerationQueue(tx, 'confession', id, null, 'pending');
       });
 
       return res.status(201).json({

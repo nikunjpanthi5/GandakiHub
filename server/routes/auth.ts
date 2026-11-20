@@ -11,7 +11,7 @@ import {
   getAuthUserFromDb,
   requireAuth,
 } from '../authMiddleware.ts';
-import { type AppDatabase, writeAuditLog } from '../db.ts';
+import { type AppDatabase, type DbExecutor, syncModerationQueue, writeAuditLog } from '../db.ts';
 import { dispatchOtpEmail } from '../email.ts';
 import {
   generateSessionToken,
@@ -21,35 +21,43 @@ import {
   isUniversityEmail,
   isUuid,
   sanitizeFilename,
+  validatePdfBuffer,
   verifyPassword,
 } from '../security.ts';
 import type { UserRole } from '../../src/types/index.ts';
 
-const registerSchema = z.object({
-  email: z.string().email().max(160),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128)
-    .regex(/[A-Za-z]/, 'Password must include a letter')
-    .regex(/[0-9]/, 'Password must include a number'),
-  username: z
-    .string()
-    .min(3)
-    .max(30)
-    .regex(/^[a-zA-Z0-9_]+$/, 'Username may contain letters, numbers, and underscores only'),
-  display_name: z.string().min(2).max(80),
-  category: z.enum(['university_member', 'external']),
-  member_type: z.enum(['student', 'teacher']).optional(),
-  program_id: z.string().nullable().optional(),
-  semester_id: z.string().nullable().optional(),
-  external_reason: z
-    .enum(['future_student', 'parent_guardian', 'university_visitor', 'researcher', 'alumni', 'platform_admin', 'other'])
-    .nullable()
-    .optional(),
-  external_reason_detail: z.string().max(400).nullable().optional(),
-  claim_super_admin: z.boolean().optional(),
-});
+const STAFF_POSITIONS = [
+  'Teacher',
+  'Faculty',
+  'Staff',
+  'Lecturer',
+  'Assistant Professor',
+  'Associate Professor',
+  'Professor',
+  'Administrative Staff',
+  'Other',
+] as const;
+
+const registerSchema = z
+  .object({
+    full_name: z.string().trim().min(2, 'Full name must be at least 2 characters').max(80).optional(),
+    display_name: z.string().trim().min(2, 'Full name must be at least 2 characters').max(80).optional(),
+    email: z.string().trim().email('Please enter a valid email address').max(160),
+    password: z
+      .string()
+      .min(8, 'Password must be at least 8 characters')
+      .max(128)
+      .regex(/[A-Za-z]/, 'Password must include a letter')
+      .regex(/[0-9]/, 'Password must include a number'),
+    confirm_password: z.string().min(1, 'Please confirm your password'),
+  })
+  .refine((d) => Boolean((d.full_name || d.display_name || '').trim().length >= 2), {
+    message: 'Full name is required (at least 2 characters).',
+  })
+  .refine((d) => d.password === d.confirm_password, {
+    message: 'Password and Confirm Password do not match.',
+    path: ['confirm_password'],
+  });
 
 const verifyOtpSchema = z.object({
   email: z.string().email(),
@@ -61,18 +69,20 @@ const loginSchema = z
   .object({
     identifier: z.string().min(1).max(160).optional(),
     email: z.string().min(1).max(160).optional(),
-    password: z.string().min(1),
+    password: z.string().min(1, 'Password is required.'),
   })
   .refine((d) => Boolean((d.identifier || d.email || '').trim()), {
-    message: 'Email or username is required.',
+    message: 'Email is required.',
   });
 
 const profileUpdateSchema = z.object({
-  display_name: z.string().min(2).max(80).optional(),
+  display_name: z.string().trim().min(2).max(80).optional(),
   bio: z.string().max(500).optional(),
   program_id: z.string().nullable().optional(),
   semester_id: z.string().nullable().optional(),
-  interests: z.array(z.string().max(40)).max(12).optional(),
+  department: z.string().trim().max(120).nullable().optional(),
+  student_id: z.string().trim().max(60).nullable().optional(),
+  interests: z.array(z.string().trim().max(40)).max(12).optional(),
   notification_prefs: z
     .object({
       replies: z.boolean(),
@@ -95,6 +105,49 @@ function getConfiguredSuperAdminEmail(): string | null {
   return val && val.includes('@') ? val : null;
 }
 
+async function generateUniqueUsername(tx: DbExecutor, fullName: string, email: string): Promise<string> {
+  const fromName = fullName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 20);
+  const fromEmail = email
+    .split('@')[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 20);
+  const base = (fromName.length >= 3 ? fromName : fromEmail.length >= 3 ? fromEmail : 'gandaki_member').slice(0, 22);
+
+  const exact = await tx.queryOne<{ id: string }>('SELECT id FROM profiles WHERE lower(username) = $1', [base]);
+  if (!exact) return base;
+
+  for (let i = 0; i < 12; i++) {
+    const suffix = crypto.randomBytes(2).toString('hex');
+    const candidate = `${base.slice(0, 24)}_${suffix}`;
+    const taken = await tx.queryOne<{ id: string }>('SELECT id FROM profiles WHERE lower(username) = $1', [candidate]);
+    if (!taken) return candidate;
+  }
+  return `member_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+async function hasMigration003ProfileCols(db: DbExecutor): Promise<boolean> {
+  const row = await db.queryOne<{ exists: string | null }>(
+    `SELECT column_name::text AS exists
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'department'
+     LIMIT 1`
+  );
+  return Boolean(row?.exists);
+}
+
+async function hasStaffVerificationTable(db: DbExecutor): Promise<boolean> {
+  const row = await db.queryOne<{ exists: string | null }>(
+    "SELECT to_regclass('public.staff_verification_requests')::text AS exists"
+  );
+  return Boolean(row?.exists);
+}
+
 export function createAuthRouter(db: AppDatabase): Router {
   const router = Router();
 
@@ -103,34 +156,16 @@ export function createAuthRouter(db: AppDatabase): Router {
     limits: { fileSize: 2 * 1024 * 1024 },
   });
 
+  const evidenceUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+  });
+
   router.get('/me', (req: AuthenticatedRequest, res) => {
     res.json({ user: req.user ?? null });
   });
 
-  router.get('/bootstrap-status', async (_req, res, next) => {
-    try {
-      const superRow = await db.queryOne<{ cnt: string | number }>(
-        "SELECT COUNT(*) AS cnt FROM profiles WHERE role = 'super_admin' AND email_verified = TRUE"
-      );
-      const initSetting = await db.queryOne<{ value: string }>(
-        "SELECT value FROM platform_settings WHERE key = 'super_admin_initialized'"
-      );
-      const needsSuperAdmin =
-        Number(superRow?.cnt || 0) === 0 && initSetting?.value !== 'true';
-      const superAdminEmailConfigured = Boolean(getConfiguredSuperAdminEmail());
-      res.json({
-        needsSuperAdmin,
-        superAdminEmailConfigured,
-        configurationError:
-          needsSuperAdmin && !superAdminEmailConfigured
-            ? 'SUPER_ADMIN_EMAIL is not configured on the server. First-time Super Admin bootstrap requires SUPER_ADMIN_EMAIL to be set.'
-            : null,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
+  // Simplified, unified registration: Full Name + Gandaki University Email + Password + Confirm Password
   router.post('/register', async (req: AuthenticatedRequest, res, next) => {
     try {
       const ipKey = `reg:${req.ip || 'local'}`;
@@ -145,15 +180,9 @@ export function createAuthRouter(db: AppDatabase): Router {
       }
 
       const data = parsed.data;
+      const fullName = (data.full_name || data.display_name || '').trim();
       const normalizedEmail = data.email.trim().toLowerCase();
-      const normalizedUsername = data.username.trim().toLowerCase();
       const envSuperEmail = getConfiguredSuperAdminEmail();
-
-      if (data.category === 'university_member' && !isUniversityEmail(normalizedEmail)) {
-        return res.status(400).json({
-          error: 'University members must register with a @gandakiuniversity.edu.np email address.',
-        });
-      }
 
       const superRow = await db.queryOne<{ cnt: string | number }>(
         "SELECT COUNT(*) AS cnt FROM profiles WHERE role = 'super_admin' AND email_verified = TRUE"
@@ -161,45 +190,16 @@ export function createAuthRouter(db: AppDatabase): Router {
       const initSetting = await db.queryOne<{ value: string }>(
         "SELECT value FROM platform_settings WHERE key = 'super_admin_initialized'"
       );
-      const superAlreadyInitialized =
-        Number(superRow?.cnt || 0) > 0 || initSetting?.value === 'true';
+      const superAlreadyInitialized = Number(superRow?.cnt || 0) > 0 || initSetting?.value === 'true';
 
-      const wantsSuperAdmin = Boolean(data.claim_super_admin) || data.external_reason === 'platform_admin';
+      const isBootstrapSuperEmail =
+        !superAlreadyInitialized && Boolean(envSuperEmail && envSuperEmail === normalizedEmail);
 
-      if (wantsSuperAdmin) {
-        if (!envSuperEmail) {
-          return res.status(503).json({
-            error: 'SUPER_ADMIN_EMAIL is not configured on the server. Super Admin setup cannot proceed.',
-          });
-        }
-        if (superAlreadyInitialized) {
-          return res.status(403).json({
-            error: 'A Super Admin account already exists. Ask the Super Admin to assign administrator roles.',
-          });
-        }
-        if (envSuperEmail !== normalizedEmail) {
-          return res.status(403).json({
-            error: 'Only the configured SUPER_ADMIN_EMAIL address can complete initial Super Admin setup.',
-          });
-        }
+      if (!isUniversityEmail(normalizedEmail) && !isBootstrapSuperEmail) {
+        return res.status(400).json({
+          error: 'Registration requires a valid @gandakiuniversity.edu.np email address.',
+        });
       }
-
-      if (data.category === 'external') {
-        if (!data.external_reason) {
-          return res.status(400).json({ error: 'Please select your reason for joining GandakiHub.' });
-        }
-        if (
-          data.external_reason === 'other' &&
-          (!data.external_reason_detail || data.external_reason_detail.trim().length < 5)
-        ) {
-          return res.status(400).json({ error: 'Please provide a brief explanation when selecting "Other".' });
-        }
-      }
-
-      const cleanProgramId =
-        data.category === 'university_member' && isUuid(data.program_id) ? data.program_id : null;
-      const cleanSemesterId =
-        data.category === 'university_member' && isUuid(data.semester_id) ? data.semester_id : null;
 
       const existingByEmail = await db.queryOne<{ user_id: string; email_verified: boolean }>(
         `SELECT uc.user_id, p.email_verified
@@ -222,54 +222,24 @@ export function createAuthRouter(db: AppDatabase): Router {
         });
       }
 
-      const existingByUsername = await db.queryOne<{ id: string }>(
-        'SELECT id FROM profiles WHERE lower(username) = $1',
-        [normalizedUsername]
-      );
-      if (existingByUsername) {
-        return res.status(409).json({ error: 'This username is already taken.' });
-      }
-
-      let initialRole: UserRole = 'visitor';
-      if (data.category === 'external') {
-        if (data.external_reason === 'future_student') initialRole = 'future_student';
-        else if (data.external_reason === 'alumni') initialRole = 'alumni';
-        else initialRole = 'visitor';
-      }
-
+      // Server-side always starts unverified accounts as 'visitor' until OTP passes,
+      // then promotes university members strictly to ordinary 'verified_student' role.
+      const initialRole: UserRole = 'visitor';
       const userId = crypto.randomUUID();
       const passHash = hashPassword(data.password);
       const otp = generateSixDigitOtp();
       const resendAfter = new Date(Date.now() + 60 * 1000).toISOString();
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-      const canClaimSuperAdmin =
-        !superAlreadyInitialized && Boolean(envSuperEmail && envSuperEmail === normalizedEmail);
-
-      let pendingDetail: string | null =
-        data.category === 'external' ? data.external_reason_detail?.trim() ?? null : null;
-      if (canClaimSuperAdmin) {
-        pendingDetail = 'pending_super_admin_claim';
-      } else if (data.category === 'university_member' && data.member_type === 'teacher') {
-        pendingDetail = 'pending_teacher_verification';
-      }
-
       try {
         await db.transaction(
           async (tx) => {
+            const generatedUsername = await generateUniqueUsername(tx, fullName, normalizedEmail);
+
             await tx.execute(
-              `INSERT INTO profiles (id, username, display_name, bio, role, email_verified, university_email_verified, external_reason, external_reason_detail, program_id, semester_id, interests, account_status, created_at, updated_at)
-               VALUES ($1, $2, $3, '', $4::user_role, FALSE, FALSE, $5, $6, $7, $8, '{}', 'active', NOW(), NOW())`,
-              [
-                userId,
-                normalizedUsername,
-                data.display_name.trim(),
-                initialRole,
-                data.category === 'external' ? data.external_reason ?? null : null,
-                pendingDetail,
-                cleanProgramId,
-                cleanSemesterId,
-              ]
+              `INSERT INTO profiles (id, username, display_name, bio, role, email_verified, university_email_verified, interests, account_status, created_at, updated_at)
+               VALUES ($1, $2, $3, '', $4::user_role, FALSE, FALSE, '{}', 'active', NOW(), NOW())`,
+              [userId, generatedUsername, fullName, initialRole]
             );
 
             await tx.execute(
@@ -291,8 +261,7 @@ export function createAuthRouter(db: AppDatabase): Router {
             );
 
             await writeAuditLog(tx, userId, 'user_registered', 'user', userId, {
-              category: data.category,
-              intended_member_type: data.member_type || 'student',
+              registration_mode: 'simplified_unified',
             });
           },
           { trustedServer: true }
@@ -301,7 +270,7 @@ export function createAuthRouter(db: AppDatabase): Router {
         const msg = err instanceof Error ? err.message : '';
         if (msg.toLowerCase().includes('unique')) {
           return res.status(409).json({
-            error: 'An account with this email address or username already exists.',
+            error: 'An account with this email address already exists.',
           });
         }
         throw err;
@@ -415,10 +384,9 @@ export function createAuthRouter(db: AppDatabase): Router {
                ON CONFLICT (key) DO UPDATE SET value = 'true'`
             );
           } else if (isUni) {
-            assignedRole =
-              userRow.external_reason_detail === 'pending_teacher_verification'
-                ? 'verified_teacher'
-                : 'verified_student';
+            // Unverified registrants strictly receive ordinary registered user role;
+            // staff/teacher elevation happens ONLY after admin approval.
+            assignedRole = 'verified_student';
             cleanDetail = null;
           } else if (cleanDetail === 'pending_super_admin_claim') {
             cleanDetail = null;
@@ -442,7 +410,9 @@ export function createAuthRouter(db: AppDatabase): Router {
               crypto.randomUUID(),
               userRow.id,
               assignedRole,
-              bootstrappedSuperAdmin ? 'First-time Super Admin bootstrap via verified SUPER_ADMIN_EMAIL' : 'OTP email verification completed',
+              bootstrappedSuperAdmin
+                ? 'First-time Super Admin bootstrap via verified SUPER_ADMIN_EMAIL'
+                : 'OTP email verification completed',
             ]
           );
 
@@ -631,10 +601,11 @@ export function createAuthRouter(db: AppDatabase): Router {
     }
   });
 
+  // Normal User Sign In
   router.post('/login', async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: 'Email or username and password are required.' });
+      if (!parsed.success) return res.status(400).json({ error: 'Email and password are required.' });
 
       const identifier = (parsed.data.identifier ?? parsed.data.email ?? '').trim().toLowerCase();
       const rl = await checkRateLimit(db, `login:${identifier}`, 12, 900);
@@ -657,7 +628,7 @@ export function createAuthRouter(db: AppDatabase): Router {
       );
 
       if (!row || !verifyPassword(parsed.data.password, String(row.password_hash))) {
-        return res.status(401).json({ error: 'Invalid credentials.' });
+        return res.status(401).json({ error: 'Invalid email or password.' });
       }
       if (row.account_status !== 'active') {
         return res.status(403).json({ error: 'Your account has been suspended. Contact campus moderation.' });
@@ -698,6 +669,74 @@ export function createAuthRouter(db: AppDatabase): Router {
     }
   });
 
+  // Dedicated Administrator Portal Login (/admin-login-hub)
+  // Unified form (Email + Password), server-side checks admin/super_admin role without exposing role picker or leaking admin emails.
+  router.post('/admin-login', async (req, res, next) => {
+    try {
+      const parsed = loginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Email and password are required.' });
+      }
+
+      const identifier = (parsed.data.email ?? parsed.data.identifier ?? '').trim().toLowerCase();
+      const rl = await checkRateLimit(db, `admin_login:${req.ip || 'local'}:${identifier}`, 10, 900);
+      if (!rl.allowed) {
+        return res.status(429).json({ error: `Too many login attempts. Retry in ${rl.retryAfterSec}s.` });
+      }
+
+      const row = await db.queryOne<{
+        id: string;
+        email: string;
+        password_hash: string;
+        role: UserRole;
+        account_status: string;
+        email_verified: boolean;
+      }>(
+        `SELECT p.id, uc.email, uc.password_hash, p.role, p.account_status, p.email_verified
+         FROM profiles p
+         JOIN user_credentials uc ON uc.user_id = p.id
+         WHERE lower(uc.email) = $1 OR lower(p.username) = $1`,
+        [identifier]
+      );
+
+      // Uniform failure message on wrong email/password so administrator emails are never enumerable
+      if (!row || !verifyPassword(parsed.data.password, String(row.password_hash))) {
+        return res.status(401).json({ error: 'Invalid credentials.' });
+      }
+
+      if (row.role !== 'admin' && row.role !== 'super_admin') {
+        await writeAuditLog(db, String(row.id), 'admin_portal_unauthorized_attempt', 'user', String(row.id), {
+          role: row.role,
+        });
+        return res.status(403).json({
+          error: 'You are not authorized to access the administrator portal.',
+        });
+      }
+
+      if (row.account_status !== 'active') {
+        return res.status(403).json({ error: 'This administrator account is currently suspended.' });
+      }
+
+      if (!row.email_verified) {
+        return res.status(403).json({ error: 'Administrator email verification is pending.' });
+      }
+
+      const token = generateSessionToken();
+      await createSessionCookie(db, req, res, String(row.id), token);
+      await writeAuditLog(db, String(row.id), 'admin_portal_login', 'user', String(row.id), {
+        role: row.role,
+      });
+
+      const user = await getAuthUserFromDb(db, String(row.id));
+      return res.json({
+        user,
+        sessionToken: token,
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   router.post('/logout', async (req: AuthenticatedRequest, res, next) => {
     try {
       const authHeader = req.headers.authorization;
@@ -727,31 +766,83 @@ export function createAuthRouter(db: AppDatabase): Router {
       const nextSemesterId =
         d.semester_id !== undefined ? (isUuid(d.semester_id) ? d.semester_id : null) : u.semester_id;
 
+      if (nextProgramId) {
+        const progExists = await db.queryOne('SELECT id FROM programs WHERE id = $1 AND is_archived = FALSE', [nextProgramId]);
+        if (!progExists) {
+          return res.status(400).json({ error: 'Selected academic program was not found.' });
+        }
+      }
+      if (nextSemesterId) {
+        const semExists = await db.queryOne('SELECT id FROM semesters WHERE id = $1 AND is_archived = FALSE', [nextSemesterId]);
+        if (!semExists) {
+          return res.status(400).json({ error: 'Selected semester was not found.' });
+        }
+      }
+
+      const supportsExtendedCols = await hasMigration003ProfileCols(db);
+      const nextDept = d.department !== undefined ? (d.department?.trim() || null) : (u.department ?? null);
+      const nextStudentId = d.student_id !== undefined ? (d.student_id?.trim() || null) : (u.student_id ?? null);
+      const nextBio = d.bio !== undefined ? d.bio.trim() : u.bio;
+      const willComplete = Boolean(
+        (nextProgramId && nextSemesterId) || (nextDept && (nextStudentId || nextBio))
+      );
+
       // Uses actorId WITHOUT trustedServer so PostgreSQL trigger protects role/status/verification fields
       const updated = await db.transaction(
         async (tx) => {
-          await tx.execute(
-            `UPDATE profiles SET
-              display_name = COALESCE($1, display_name),
-              bio = COALESCE($2, bio),
-              program_id = $3,
-              semester_id = $4,
-              interests = COALESCE($5::text[], interests),
-              notification_prefs = COALESCE($6::jsonb, notification_prefs),
-              privacy_settings = COALESCE($7::jsonb, privacy_settings),
-              updated_at = NOW()
-             WHERE id = $8`,
-            [
-              d.display_name?.trim() ?? null,
-              d.bio !== undefined ? d.bio.trim() : null,
-              nextProgramId,
-              nextSemesterId,
-              d.interests ?? null,
-              d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-              d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
-              u.id,
-            ]
-          );
+          if (supportsExtendedCols) {
+            await tx.execute(
+              `UPDATE profiles SET
+                display_name = COALESCE($1, display_name),
+                bio = COALESCE($2, bio),
+                program_id = $3,
+                semester_id = $4,
+                department = $5,
+                student_id = $6,
+                profile_completed = profile_completed OR $7,
+                interests = COALESCE($8::text[], interests),
+                notification_prefs = COALESCE($9::jsonb, notification_prefs),
+                privacy_settings = COALESCE($10::jsonb, privacy_settings),
+                updated_at = NOW()
+               WHERE id = $11`,
+              [
+                d.display_name?.trim() ?? null,
+                d.bio !== undefined ? d.bio.trim() : null,
+                nextProgramId,
+                nextSemesterId,
+                nextDept,
+                nextStudentId,
+                willComplete,
+                d.interests ?? null,
+                d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
+                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                u.id,
+              ]
+            );
+          } else {
+            await tx.execute(
+              `UPDATE profiles SET
+                display_name = COALESCE($1, display_name),
+                bio = COALESCE($2, bio),
+                program_id = $3,
+                semester_id = $4,
+                interests = COALESCE($5::text[], interests),
+                notification_prefs = COALESCE($6::jsonb, notification_prefs),
+                privacy_settings = COALESCE($7::jsonb, privacy_settings),
+                updated_at = NOW()
+               WHERE id = $8`,
+              [
+                d.display_name?.trim() ?? null,
+                d.bio !== undefined ? d.bio.trim() : null,
+                nextProgramId,
+                nextSemesterId,
+                d.interests ?? null,
+                d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
+                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                u.id,
+              ]
+            );
+          }
           return getAuthUserFromDb(tx, u.id);
         },
         { actorId: u.id, trustedServer: false }
@@ -762,6 +853,205 @@ export function createAuthRouter(db: AppDatabase): Router {
       return next(err);
     }
   });
+
+  // Get own latest university staff verification request & status
+  router.get('/staff-verification', requireAuth, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tableReady = await hasStaffVerificationTable(db);
+      if (!tableReady) {
+        return res.json({
+          status: req.user!.role === 'verified_teacher' ? 'approved' : 'not_requested',
+          latestRequest: null,
+        });
+      }
+
+      const row = await db.queryOne<Record<string, unknown>>(
+        `SELECT id, user_id, position, department, designation, university_email, supporting_notes,
+                (evidence_object_path IS NOT NULL) AS has_evidence, evidence_original_filename,
+                status, reviewer_id, review_notes, reviewed_at, created_at, updated_at
+         FROM staff_verification_requests
+         WHERE user_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [req.user!.id]
+      );
+
+      const status =
+        req.user!.role === 'verified_teacher'
+          ? 'approved'
+          : row
+            ? String(row.status)
+            : 'not_requested';
+
+      const latestRequest = row
+        ? {
+            ...row,
+            has_evidence: Boolean(row.has_evidence),
+            reviewed_at: row.reviewed_at ? new Date(String(row.reviewed_at)).toISOString() : null,
+            created_at: new Date(String(row.created_at)).toISOString(),
+            updated_at: new Date(String(row.updated_at)).toISOString(),
+          }
+        : null;
+
+      return res.json({
+        status,
+        latestRequest,
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  // Submit University Staff Verification Request (NEVER grants privileges immediately; requires admin approval)
+  router.post(
+    '/staff-verification',
+    requireAuth,
+    evidenceUpload.single('evidence'),
+    async (req: AuthenticatedRequest, res, next) => {
+      try {
+        const u = req.user!;
+        if (u.role === 'visitor' || u.role === 'future_student') {
+          return res.status(403).json({
+            error: 'Only verified university members can request university staff verification.',
+          });
+        }
+        if (u.role === 'verified_teacher' || u.role === 'admin' || u.role === 'super_admin') {
+          return res.status(400).json({
+            error: 'Your account already holds verified staff or administrative privileges.',
+          });
+        }
+
+        const tableReady = await hasStaffVerificationTable(db);
+        if (!tableReady) {
+          return res.status(503).json({
+            error: 'Staff verification database migration (003) has not been applied yet.',
+          });
+        }
+
+        const parsed = z
+          .object({
+            position: z.enum(STAFF_POSITIONS),
+            department: z.string().trim().min(2, 'Department is required').max(120),
+            designation: z.string().trim().max(120).default(''),
+            supporting_notes: z.string().trim().max(1000).default(''),
+          })
+          .safeParse(req.body);
+
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: parsed.error.issues[0]?.message || 'Please complete all required staff verification fields.',
+          });
+        }
+
+        const existingPending = await db.queryOne<{ id: string }>(
+          "SELECT id FROM staff_verification_requests WHERE user_id = $1 AND status = 'pending'",
+          [u.id]
+        );
+        if (existingPending) {
+          return res.status(409).json({
+            error: 'You already have a pending university staff verification request awaiting review.',
+          });
+        }
+
+        let evidencePath: string | null = null;
+        let evidenceOrigName: string | null = null;
+        let evidenceMime: string | null = null;
+
+        if (req.file) {
+          const buf = req.file.buffer;
+          const isPng = buf.subarray(0, 8).toString('hex') === '89504e470d0a1a0a';
+          const isJpg = buf.subarray(0, 3).toString('hex') === 'ffd8ff';
+          const pdfCheck = validatePdfBuffer(buf);
+
+          if (!isPng && !isJpg && !pdfCheck.valid) {
+            return res.status(400).json({
+              error: 'Supporting evidence must be a valid PDF, PNG, or JPEG file (max 5MB).',
+            });
+          }
+
+          const ext = isPng ? 'png' : isJpg ? 'jpg' : 'pdf';
+          evidenceMime = isPng ? 'image/png' : isJpg ? 'image/jpeg' : 'application/pdf';
+          evidenceOrigName = sanitizeFilename(req.file.originalname);
+          const safeBase = evidenceOrigName.replace(/\.[^.]+$/, '');
+          evidencePath = `verification-evidence/${u.id}/${Date.now()}_${safeBase}.${ext}`;
+          await req.storage!.uploadPrivate(evidencePath, buf, evidenceMime);
+        }
+
+        const reqId = crypto.randomUUID();
+        const supportsExtendedCols = await hasMigration003ProfileCols(db);
+
+        await db.transaction(
+          async (tx) => {
+            await tx.execute(
+              `INSERT INTO staff_verification_requests
+               (id, user_id, position, department, designation, university_email, supporting_notes,
+                evidence_object_path, evidence_original_filename, evidence_mime_type, status, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', NOW(), NOW())`,
+              [
+                reqId,
+                u.id,
+                parsed.data.position,
+                parsed.data.department,
+                parsed.data.designation,
+                u.email,
+                parsed.data.supporting_notes,
+                evidencePath,
+                evidenceOrigName,
+                evidenceMime,
+              ]
+            );
+
+            // Save descriptive position/department on profile WITHOUT elevating role
+            if (supportsExtendedCols) {
+              await tx.execute(
+                `UPDATE profiles
+                 SET staff_position = $1,
+                     department = $2,
+                     designation = $3,
+                     updated_at = NOW()
+                 WHERE id = $4`,
+                [parsed.data.position, parsed.data.department, parsed.data.designation || null, u.id]
+              );
+            }
+
+            await syncModerationQueue(tx, 'staff_verification', reqId, u.id, 'pending');
+            await writeAuditLog(tx, u.id, 'staff_verification_requested', 'staff_verification', reqId, {
+              position: parsed.data.position,
+              department: parsed.data.department,
+              has_evidence: Boolean(evidencePath),
+            });
+          },
+          { actorId: u.id, trustedServer: false }
+        );
+
+        const refreshedUser = await getAuthUserFromDb(db, u.id);
+        return res.status(201).json({
+          status: 'pending',
+          user: refreshedUser,
+          request: {
+            id: reqId,
+            user_id: u.id,
+            position: parsed.data.position,
+            department: parsed.data.department,
+            designation: parsed.data.designation,
+            university_email: u.email,
+            supporting_notes: parsed.data.supporting_notes,
+            has_evidence: Boolean(evidencePath),
+            evidence_original_filename: evidenceOrigName,
+            status: 'pending',
+            reviewer_id: null,
+            review_notes: null,
+            reviewed_at: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          message:
+            'Your university staff verification request has been submitted for administrator review. Your account remains a standard member until approved.',
+        });
+      } catch (err) {
+        return next(err);
+      }
+    }
+  );
 
   router.post(
     '/profile/avatar',
@@ -824,10 +1114,7 @@ export function createAuthRouter(db: AppDatabase): Router {
   router.get('/users/:username', async (req: AuthenticatedRequest, res, next) => {
     try {
       const row = await db.queryOne<Record<string, unknown>>(
-        `SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio, u.role,
-                u.university_email_verified, u.email_verified, u.program_id, u.semester_id,
-                u.interests, u.privacy_settings, u.account_status, u.created_at,
-                p.name AS program_name, s.name AS semester_name
+        `SELECT u.*, p.name AS program_name, s.name AS semester_name
          FROM profiles u
          LEFT JOIN programs p ON p.id = u.program_id
          LEFT JOIN semesters s ON s.id = u.semester_id
@@ -872,6 +1159,10 @@ export function createAuthRouter(db: AppDatabase): Router {
           program_name: privacy.show_program || isSelf ? row.program_name : null,
           semester_id: privacy.show_program || isSelf ? row.semester_id : null,
           semester_name: privacy.show_program || isSelf ? row.semester_name : null,
+          department: privacy.show_program || isSelf ? (row.department ? String(row.department) : null) : null,
+          student_id: isSelf ? (row.student_id ? String(row.student_id) : null) : null,
+          staff_position: row.role === 'verified_teacher' ? (row.staff_position ? String(row.staff_position) : null) : null,
+          designation: row.role === 'verified_teacher' ? (row.designation ? String(row.designation) : null) : null,
           interests: Array.isArray(row.interests) ? row.interests : [],
           account_status: row.account_status,
           created_at: new Date(String(row.created_at)).toISOString(),

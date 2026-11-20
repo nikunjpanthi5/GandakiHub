@@ -19,6 +19,30 @@ export type ExternalReason =
   | 'platform_admin'
   | 'other';
 
+export type StaffVerificationStatus = 'not_requested' | 'pending' | 'approved' | 'rejected';
+
+export interface StaffVerificationRequest {
+  id: string;
+  user_id: string;
+  position: string;
+  department: string;
+  designation: string;
+  university_email: string;
+  supporting_notes: string;
+  has_evidence: boolean;
+  evidence_original_filename: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewer_id: string | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  requester_name?: string;
+  requester_username?: string;
+  requester_email?: string;
+  requester_role?: UserRole;
+}
+
 export interface PublicProfile {
   id: string;
   username: string;
@@ -32,6 +56,10 @@ export interface PublicProfile {
   program_name?: string | null;
   semester_id: string | null;
   semester_name?: string | null;
+  department?: string | null;
+  student_id?: string | null;
+  staff_position?: string | null;
+  designation?: string | null;
   interests: string[];
   account_status: AccountStatus;
   created_at: string;
@@ -42,6 +70,9 @@ export interface AuthUser extends PublicProfile {
   email: string;
   external_reason: ExternalReason | null;
   external_reason_detail: string | null;
+  profile_completed: boolean;
+  profile_completion_pct: number;
+  staff_verification_status: StaffVerificationStatus;
   notification_prefs: {
     replies: boolean;
     connections: boolean;

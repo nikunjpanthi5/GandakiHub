@@ -27,7 +27,8 @@ export type AppRoute =
   | 'messages'
   | 'notifications'
   | 'profile'
-  | 'admin';
+  | 'admin'
+  | 'admin-login-hub';
 
 export interface RouteState {
   page: AppRoute;
@@ -58,13 +59,13 @@ interface AppContextValue {
   theme: 'light' | 'dark';
   route: RouteState;
   authModalOpen: boolean;
-  authModalMode: 'login' | 'register' | 'super_admin_login';
+  authModalMode: 'login' | 'register';
   policyModal: 'privacy' | 'terms' | 'guidelines' | 'moderation' | null;
   toasts: ToastMessage[];
   navigate: (page: AppRoute, param?: string, query?: Record<string, string>) => void;
   toggleTheme: () => void;
   setAuthModalOpen: (open: boolean) => void;
-  openAuthModal: (mode?: 'login' | 'register' | 'super_admin_login') => void;
+  openAuthModal: (mode?: 'login' | 'register') => void;
   setPolicyModal: (doc: 'privacy' | 'terms' | 'guidelines' | 'moderation' | null) => void;
   notify: (text: string, tone?: 'success' | 'error' | 'info') => void;
   applyAuthSession: (user: AuthUser, sessionToken?: string) => void;
@@ -77,7 +78,11 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-function parseHashRoute(): RouteState {
+function parseCurrentRoute(): RouteState {
+  const cleanPath = window.location.pathname.replace(/\/+$/, '');
+  if (cleanPath === '/admin-login-hub') {
+    return { page: 'admin-login-hub' };
+  }
   const raw = window.location.hash.replace(/^#\/?/, '');
   if (!raw) return { page: 'home' };
   const [pathPart, qsPart] = raw.split('?');
@@ -110,9 +115,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const saved = localStorage.getItem('gh_theme');
     return saved === 'dark' ? 'dark' : 'light';
   });
-  const [route, setRoute] = useState<RouteState>(() => parseHashRoute());
+  const [route, setRoute] = useState<RouteState>(() => parseCurrentRoute());
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'super_admin_login'>('login');
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
   const [policyModal, setPolicyModal] = useState<'privacy' | 'terms' | 'guidelines' | 'moderation' | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -124,9 +129,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
-    const onHash = () => setRoute(parseHashRoute());
-    window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
+    const onRouteChange = () => setRoute(parseCurrentRoute());
+    window.addEventListener('hashchange', onRouteChange);
+    window.addEventListener('popstate', onRouteChange);
+    return () => {
+      window.removeEventListener('hashchange', onRouteChange);
+      window.removeEventListener('popstate', onRouteChange);
+    };
   }, []);
 
   const notify = useCallback((text: string, tone: 'success' | 'error' | 'info' = 'info') => {
@@ -138,13 +147,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const navigate = useCallback((page: AppRoute, param?: string, query?: Record<string, string>) => {
+    if (page === 'admin-login-hub') {
+      if (window.location.pathname !== '/admin-login-hub') {
+        window.history.pushState(null, '', '/admin-login-hub');
+      }
+      setRoute({ page: 'admin-login-hub' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
     let hash = `#/${page}`;
     if (param) hash += `/${encodeURIComponent(param)}`;
     if (query && Object.keys(query).length > 0) {
       const sp = new URLSearchParams(query);
       hash += `?${sp.toString()}`;
     }
-    window.location.hash = hash;
+    if (window.location.pathname !== '/') {
+      window.history.replaceState(null, '', `/${hash}`);
+    } else {
+      window.location.hash = hash;
+    }
     setRoute({ page, param, query });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
@@ -153,7 +175,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setTheme((t) => (t === 'light' ? 'dark' : 'light'));
   }, []);
 
-  const openAuthModal = useCallback((mode: 'login' | 'register' | 'super_admin_login' = 'login') => {
+  const openAuthModal = useCallback((mode: 'login' | 'register' = 'login') => {
     setAuthModalMode(mode);
     setAuthModalOpen(true);
   }, []);
