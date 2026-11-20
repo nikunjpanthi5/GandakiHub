@@ -21,11 +21,13 @@ function CommentNode({
   depth,
   onReply,
   onVote,
+  onReport,
 }: {
   comment: CommentItem;
   depth: number;
   onReply: (parentId: string, body: string) => Promise<void>;
   onVote: (commentId: string, val: 1 | -1) => Promise<void>;
+  onReport: (commentId: string) => void;
 }) {
   const [replyOpen, setReplyOpen] = useState(false);
   const [replyText, setReplyText] = useState('');
@@ -73,6 +75,14 @@ function CommentNode({
           >
             Reply
           </button>
+          <button
+            type="button"
+            onClick={() => onReport(comment.id)}
+            className="inline-flex items-center gap-1 hover:text-red-600 dark:hover:text-red-400"
+            aria-label="Report comment"
+          >
+            <Flag className="w-3 h-3" /> Report
+          </button>
         </div>
 
         {replyOpen && (
@@ -96,7 +106,7 @@ function CommentNode({
       </div>
 
       {comment.replies?.map((child) => (
-        <CommentNode key={child.id} comment={child} depth={depth + 1} onReply={onReply} onVote={onVote} />
+        <CommentNode key={child.id} comment={child} depth={depth + 1} onReply={onReply} onVote={onVote} onReport={onReport} />
       ))}
     </div>
   );
@@ -117,8 +127,9 @@ export function PostFeed({
   const [commentsByPost, setCommentsByPost] = useState<Record<string, CommentItem[]>>({});
   const [newCommentText, setNewCommentText] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
-  const [reportTarget, setReportTarget] = useState<{ type: 'post'; id: string } | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ type: 'post' | 'comment'; id: string } | null>(null);
   const [reportReason, setReportReason] = useState('Harassment or abusive behavior');
+  const [reportDetails, setReportDetails] = useState('');
 
   // Create Post form state
   const [postCommunityId, setPostCommunityId] = useState('');
@@ -300,13 +311,19 @@ export function PostFeed({
   async function submitReport(e: React.FormEvent) {
     e.preventDefault();
     if (!reportTarget) return;
-    await api.post('/api/reports', {
-      target_type: reportTarget.type,
-      target_id: reportTarget.id,
-      reason: reportReason,
-    });
-    setReportTarget(null);
-    notify('Report submitted to moderators.', 'success');
+    try {
+      await api.post('/api/reports', {
+        target_type: reportTarget.type,
+        target_id: reportTarget.id,
+        reason: reportReason,
+        details: reportDetails.trim(),
+      });
+      setReportTarget(null);
+      setReportDetails('');
+      notify('Report submitted to moderators.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to submit report.', 'error');
+    }
   }
 
   return (
@@ -680,6 +697,7 @@ export function PostFeed({
                             depth={0}
                             onReply={(parentId, body) => handleAddComment(post.id, parentId, body)}
                             onVote={(cid, val) => handleVote('comment', cid, val)}
+                            onReport={(cid) => (user ? setReportTarget({ type: 'comment', id: cid }) : setAuthModalOpen(true))}
                           />
                         ))}
                       </div>
@@ -859,19 +877,42 @@ export function PostFeed({
       {reportTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <form onSubmit={submitReport} className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
-            <h3 className="text-base font-semibold">Report Content</h3>
-            <select
-              value={reportReason}
-              onChange={(e) => setReportReason(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
-            >
-              <option>Harassment or abusive behavior</option>
-              <option>Spam or misleading content</option>
-              <option>Wrong academic category or subject</option>
-              <option>Privacy violation or personal info exposure</option>
-            </select>
+            <h3 className="text-base font-semibold">
+              {reportTarget.type === 'comment' ? 'Report Comment' : 'Report Post'}
+            </h3>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Reason</label>
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
+              >
+                <option>Harassment or abusive behavior</option>
+                <option>Spam or misleading content</option>
+                <option>Wrong academic category or subject</option>
+                <option>Privacy violation or personal info exposure</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Additional Details (Optional)</label>
+              <textarea
+                rows={3}
+                maxLength={600}
+                value={reportDetails}
+                onChange={(e) => setReportDetails(e.target.value)}
+                placeholder="Explain what should be reviewed by moderators..."
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs"
+              />
+            </div>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setReportTarget(null)} className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setReportTarget(null);
+                  setReportDetails('');
+                }}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs"
+              >
                 Cancel
               </button>
               <button type="submit" className="px-4 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium">

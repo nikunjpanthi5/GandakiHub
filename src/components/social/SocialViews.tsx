@@ -5,6 +5,7 @@ import {
   Check,
   Clock,
   FileUp,
+  Flag,
   LockKeyhole,
   MessageSquareLock,
   Search,
@@ -443,6 +444,10 @@ export function ProfileView({ username }: { username?: string }) {
   const [staffEvidence, setStaffEvidence] = useState<File | null>(null);
   const [submittingStaff, setSubmittingStaff] = useState(false);
   const [showStaffForm, setShowStaffForm] = useState(false);
+  const [reportUserOpen, setReportUserOpen] = useState(false);
+  const [reportReason, setReportReason] = useState('Harassment or abusive behavior');
+  const [reportDetails, setReportDetails] = useState('');
+  const [submittingReport, setSubmittingReport] = useState(false);
 
   const targetUsername = username || user?.username;
   const isSelf = Boolean(user && profile && user.id === profile.id);
@@ -596,6 +601,27 @@ export function ProfileView({ username }: { username?: string }) {
     }
   }
 
+  async function handleReportUser(e: React.FormEvent) {
+    e.preventDefault();
+    if (!profile) return;
+    setSubmittingReport(true);
+    try {
+      await api.post('/api/reports', {
+        target_type: 'user',
+        target_id: profile.id,
+        reason: reportReason,
+        details: reportDetails.trim(),
+      });
+      setReportUserOpen(false);
+      setReportDetails('');
+      notify('User reported for administrator review.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to submit user report.', 'error');
+    } finally {
+      setSubmittingReport(false);
+    }
+  }
+
   const canRequestStaffVerification =
     isSelf && user && !['verified_teacher', 'admin', 'super_admin', 'community_moderator'].includes(user.role);
 
@@ -681,7 +707,7 @@ export function ProfileView({ username }: { username?: string }) {
             </div>
           </div>
 
-          {isSelf && (
+          {isSelf ? (
             <div className="flex items-center gap-2">
               <label className="cursor-pointer px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800">
                 Change Photo
@@ -693,6 +719,16 @@ export function ProfileView({ username }: { username?: string }) {
                 className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium"
               >
                 {editing ? 'Cancel' : 'Edit Profile'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => (user ? setReportUserOpen(true) : setAuthModalOpen(true))}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+              >
+                <Flag className="w-3.5 h-3.5" /> Report User
               </button>
             </div>
           )}
@@ -1055,6 +1091,56 @@ export function ProfileView({ username }: { username?: string }) {
           )}
         </section>
       </div>
+      {reportUserOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <form onSubmit={handleReportUser} className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
+            <h3 className="text-base font-semibold">Report User (@{profile.username})</h3>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Reason</label>
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
+              >
+                <option>Harassment or abusive behavior</option>
+                <option>Impersonation or misleading account</option>
+                <option>Spam or unsolicited messaging</option>
+                <option>Privacy violation or personal info exposure</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Additional Details (Optional)</label>
+              <textarea
+                rows={3}
+                maxLength={600}
+                value={reportDetails}
+                onChange={(e) => setReportDetails(e.target.value)}
+                placeholder="Describe the behavior or account issue for administrators..."
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setReportUserOpen(false);
+                  setReportDetails('');
+                }}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingReport}
+                className="px-4 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium disabled:opacity-50"
+              >
+                {submittingReport ? 'Submitting...' : 'Submit Report'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

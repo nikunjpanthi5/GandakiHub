@@ -1272,4 +1272,163 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       expect((audits.data.logs as Array<{ action: string }>).some((l) => l.action === 'staff_verification_approved')).toBe(true);
     });
   });
+
+  describe('9. Report Target Inspection & Moderation Actions', () => {
+    it('resolves exact reported posts, comments, confessions (without identity leaks), and users in admin overview and hides targets on resolution', async () => {
+      // Upload an image and create a post + comment + confession to report
+      const pngBytes = Buffer.from(
+        '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
+        'hex'
+      );
+      const imgFd = new FormData();
+      imgFd.append('image', new Blob([new Uint8Array(pngBytes)], { type: 'image/png' }), 'evidence.png');
+      const imgUp = await req('/api/media/upload', { method: 'POST', cookie: studentCookie, formData: imgFd });
+      expect(imgUp.status).toBe(201);
+
+      const postRes = await req('/api/posts', {
+        method: 'POST',
+        cookie: studentCookie,
+        json: {
+          community_id: bitCommId,
+          title: 'Reported Discussion Title',
+          body: 'Exact reported post body for admin inspection.',
+          image_url: imgUp.data.image_url,
+        },
+      });
+      expect(postRes.status).toBe(201);
+      const reportedPostId = postRes.data.id as string;
+
+      const cmtRes = await req(`/api/posts/${reportedPostId}/comments`, {
+        method: 'POST',
+        cookie: otherStudentCookie,
+        json: { body: 'Exact reported comment text under review.' },
+      });
+      expect(cmtRes.status).toBe(201);
+      const reportedCommentId = cmtRes.data.id as string;
+
+      const confListRes = await req('/api/confessions');
+      const approvedConfId = (confListRes.data.confessions[0] as { id: string }).id;
+
+      // Submit reports for post, comment, confession, and user
+      const repPost = await req('/api/reports', {
+        method: 'POST',
+        cookie: otherStudentCookie,
+        json: {
+          target_type: 'post',
+          target_id: reportedPostId,
+          reason: 'Spam or misleading content',
+          details: 'Check attached image and post text.',
+        },
+      });
+      expect(repPost.status).toBe(201);
+
+      const repComment = await req('/api/reports', {
+        method: 'POST',
+        cookie: studentCookie,
+        json: {
+          target_type: 'comment',
+          target_id: reportedCommentId,
+          reason: 'Harassment or abusive behavior',
+          details: 'Offensive reply on my thread.',
+        },
+      });
+      expect(repComment.status).toBe(201);
+
+      const repConf = await req('/api/reports', {
+        method: 'POST',
+        cookie: otherStudentCookie,
+        json: {
+          target_type: 'confession',
+          target_id: approvedConfId,
+          reason: 'Doxxing or personal identity exposure',
+        },
+      });
+      expect(repConf.status).toBe(201);
+
+      const otherUserRow = await db.queryOne<{ id: string }>(
+        'SELECT id FROM profiles WHERE id <> $1 AND role = $2 LIMIT 1',
+        [studentId, 'verified_student']
+      );
+      expect(otherUserRow).not.toBeNull();
+      const repUser = await req('/api/reports', {
+        method: 'POST',
+        cookie: studentCookie,
+        json: {
+          target_type: 'user',
+          target_id: otherUserRow!.id,
+          reason: 'Impersonation or misleading account',
+        },
+      });
+      expect(repUser.status).toBe(201);
+
+      // Admin & Super Admin overview returns exact resolved targets
+      const overviewRes = await req('/api/admin/overview', { cookie: adminCookie });
+      expect(overviewRes.status).toBe(200);
+      const reports = overviewRes.data.queues.openReports as Array<{
+        id: string;
+        target_type: string;
+        target_id: string;
+        details: string;
+        target: {
+          exists: boolean;
+          title: string | null;
+          body: string | null;
+          image_url: string | null;
+          author_name: string | null;
+          author_username: string | null;
+          context_label: string | null;
+          post_id: string | null;
+        };
+      }>;
+
+      const postRp = reports.find((r) => r.id === repPost.data.id);
+      expect(postRp?.target.exists).toBe(true);
+      expect(postRp?.target.title).toBe('Reported Discussion Title');
+      expect(postRp?.target.body).toBe('Exact reported post body for admin inspection.');
+      expect(postRp?.target.image_url).toBe(imgUp.data.image_url);
+      expect(postRp?.target.author_username).toBe(studentUsername);
+      expect(postRp?.details).toBe('Check attached image and post text.');
+
+      const commentRp = reports.find((r) => r.id === repComment.data.id);
+      expect(commentRp?.target.exists).toBe(true);
+      expect(commentRp?.target.body).toBe('Exact reported comment text under review.');
+      expect(commentRp?.target.post_id).toBe(reportedPostId);
+      expect(commentRp?.target.context_label).toContain('Reported Discussion Title');
+      expect(commentRp?.target.author_username).toBeTruthy();
+
+      const confRp = reports.find((r) => r.id === repConf.data.id);
+      expect(confRp?.target.exists).toBe(true);
+      expect(confRp?.target.author_name).toBe('Anonymous Student');
+      expect(confRp?.target.author_username).toBeNull(); // Never leak confession author identity in report queue
+
+      const userRp = reports.find((r) => r.id === repUser.data.id);
+      expect(userRp?.target.exists).toBe(true);
+      expect(userRp?.target.author_username).toBeTruthy();
+
+      // Resolving comment report with action=hide_target hides the comment and marks report resolved
+      const hideCmtRes = await req(`/api/admin/reports/${repComment.data.id}`, {
+        method: 'PATCH',
+        cookie: superCookie,
+        json: { status: 'resolved', action: 'hide_target', resolution_notes: 'Removed abusive comment' },
+      });
+      expect(hideCmtRes.status).toBe(200);
+      const hiddenComment = await db.queryOne<{ is_hidden: boolean }>('SELECT is_hidden FROM comments WHERE id = $1', [
+        reportedCommentId,
+      ]);
+      expect(Boolean(hiddenComment?.is_hidden)).toBe(true);
+
+      // Resolving post report with action=hide_target hides the post
+      const hidePostRes = await req(`/api/admin/reports/${repPost.data.id}`, {
+        method: 'PATCH',
+        cookie: adminCookie,
+        json: { status: 'resolved', action: 'hide_target' },
+      });
+      expect(hidePostRes.status).toBe(200);
+      const hiddenPost = await db.queryOne<{ is_hidden: boolean }>('SELECT is_hidden FROM posts WHERE id = $1', [
+        reportedPostId,
+      ]);
+      expect(Boolean(hiddenPost?.is_hidden)).toBe(true);
+    });
+  });
 });
+

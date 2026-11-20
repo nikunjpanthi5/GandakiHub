@@ -3,7 +3,9 @@ import {
   Archive,
   Check,
   Edit3,
+  ExternalLink,
   Eye,
+  Flag,
   FolderPlus,
   KeyRound,
   Plus,
@@ -14,10 +16,43 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { api, formatBytes, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
+import { api, formatBytes, formatRelativeDate, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type { Community, StaffVerificationRequest, UserRole } from '../../types/index.ts';
 
 type AdminTab = 'overview' | 'academic' | 'moderation' | 'staff_verification' | 'users' | 'profanity' | 'audit';
+
+interface ReportedTargetPreview {
+  exists: boolean;
+  type: string;
+  id: string;
+  title: string | null;
+  body: string | null;
+  image_url: string | null;
+  context_label: string | null;
+  community_slug: string | null;
+  post_id: string | null;
+  author_id: string | null;
+  author_name: string | null;
+  author_username: string | null;
+  author_role: string | null;
+  is_hidden: boolean;
+  status: string | null;
+  created_at: string | null;
+}
+
+interface AdminReportItem {
+  id: string;
+  target_type: string;
+  target_id: string;
+  reason: string;
+  details?: string;
+  reporter_name: string;
+  reporter_username?: string;
+  status: string;
+  resolution_notes?: string | null;
+  created_at?: string;
+  target?: ReportedTargetPreview;
+}
 
 interface AdminOverviewData {
   stats: Record<string, number>;
@@ -38,7 +73,7 @@ interface AdminOverviewData {
     pendingConfessions: Array<{ id: string; title: string; body: string; image_url?: string | null; category: string; created_at: string }>;
     pendingOpportunities: Array<{ id: string; title: string; organization: string; kind: string; author_name: string }>;
     pendingDonations: Array<{ id: string; title: string; category: string; requester_name: string; description: string }>;
-    openReports: Array<{ id: string; target_type: string; target_id: string; reason: string; reporter_name: string; status: string }>;
+    openReports: AdminReportItem[];
   };
 }
 
@@ -49,6 +84,8 @@ export function AdminDashboard() {
   const [staffRequests, setStaffRequests] = useState<StaffVerificationRequest[]>([]);
   const [staffFilter, setStaffFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [staffReviewNotes, setStaffReviewNotes] = useState<Record<string, string>>({});
+  const [reportFilter, setReportFilter] = useState<'open' | 'all'>('open');
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
   const [usersList, setUsersList] = useState<Array<{ id: string; email: string; username: string; display_name: string; role: UserRole; account_status: string; university_email_verified: boolean | number; program_code: string | null }>>([]);
   const [userSearch, setUserSearch] = useState('');
   const [profanityList, setProfanityList] = useState<Array<{ id: string; term: string; language: string; severity: string; context_exception_note: string | null }>>([]);
@@ -435,6 +472,60 @@ export function AdminDashboard() {
     }
   }
 
+  async function handleResolveReport(
+    reportId: string,
+    status: 'resolved' | 'dismissed',
+    action: 'none' | 'hide_target' = 'none'
+  ) {
+    try {
+      const note = (reportNotes[reportId] || '').trim();
+      await api.patch(`/api/admin/reports/${encodeURIComponent(reportId)}`, {
+        status,
+        action,
+        resolution_notes:
+          note ||
+          (action === 'hide_target'
+            ? 'Reported content hidden and resolved by moderator'
+            : status === 'resolved'
+              ? 'Reviewed by moderator'
+              : 'Dismissed after review'),
+      });
+      setReportNotes((prev) => {
+        const next = { ...prev };
+        delete next[reportId];
+        return next;
+      });
+      await loadOverview();
+      notify(
+        action === 'hide_target'
+          ? 'Reported content hidden and report marked resolved.'
+          : status === 'resolved'
+            ? 'Report marked as resolved.'
+            : 'Report dismissed.',
+        status === 'resolved' ? 'success' : 'info'
+      );
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to update report.', 'error');
+    }
+  }
+
+  function formatReportTargetLabel(type: string): string {
+    switch (type) {
+      case 'post':
+        return 'Discussion Post';
+      case 'comment':
+        return 'Comment';
+      case 'resource':
+        return 'Academic Resource';
+      case 'confession':
+        return 'Confession';
+      case 'user':
+        return 'User Account';
+      default:
+        return type;
+    }
+  }
+
   const semsForProg = fullStruct.semesters.filter((s) => s.program_id === selectedProgId);
   const subjsForSem = fullStruct.subjects.filter((s) => s.semester_id === selectedSemId);
   const foldersForSubj = fullStruct.folders.filter((f) => f.subject_id === selectedSubjId);
@@ -485,26 +576,71 @@ export function AdminDashboard() {
 
       {/* OVERVIEW */}
       {tab === 'overview' && overview && (
-        <section className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {[
-            { label: 'Registered Users', value: overview.stats.total_users },
-            { label: 'Verified Students', value: overview.stats.verified_students },
-            { label: 'Verified Teachers', value: overview.stats.verified_teachers },
-            { label: 'Approved Resources', value: overview.stats.total_resources },
-            { label: 'Pending PDFs / Revisions', value: overview.stats.pending_resources },
-            { label: 'Pending Staff Verifications', value: overview.stats.pending_staff_verifications ?? 0 },
-            { label: 'Pending Confessions', value: overview.stats.pending_confessions },
-            { label: 'Pending Complaints', value: overview.stats.pending_complaints },
-            { label: 'Open Reports', value: overview.stats.open_reports },
-          ].map((m) => (
-            <div key={m.label} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">{m.label}</div>
-              <div className="font-mono tabular-nums text-2xl font-bold text-slate-900 dark:text-white mt-1">
-                {m.value}
+        <div className="space-y-5">
+          <section className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            {[
+              { label: 'Registered Users', value: overview.stats.total_users },
+              { label: 'Verified Students', value: overview.stats.verified_students },
+              { label: 'Verified Teachers', value: overview.stats.verified_teachers },
+              { label: 'Approved Resources', value: overview.stats.total_resources },
+              { label: 'Pending PDFs / Revisions', value: overview.stats.pending_resources },
+              { label: 'Pending Staff Verifications', value: overview.stats.pending_staff_verifications ?? 0 },
+              { label: 'Pending Confessions', value: overview.stats.pending_confessions },
+              { label: 'Pending Complaints', value: overview.stats.pending_complaints },
+              { label: 'Open Reports', value: overview.stats.open_reports },
+            ].map((m) => (
+              <div key={m.label} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <div className="text-xs text-slate-500 dark:text-slate-400">{m.label}</div>
+                <div className="font-mono tabular-nums text-2xl font-bold text-slate-900 dark:text-white mt-1">
+                  {m.value}
+                </div>
               </div>
-            </div>
-          ))}
-        </section>
+            ))}
+          </section>
+
+          {overview.queues.openReports.some((r) => r.status === 'open') && (
+            <section className="rounded-xl border border-red-200 dark:border-red-900/60 bg-white dark:bg-slate-900 p-5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Flag className="w-4 h-4 text-red-600 dark:text-red-400" />
+                  Open Reports Requiring Review ({overview.queues.openReports.filter((r) => r.status === 'open').length})
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setTab('moderation')}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium"
+                >
+                  Inspect &amp; Moderate in Review Queues
+                </button>
+              </div>
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {overview.queues.openReports
+                  .filter((r) => r.status === 'open')
+                  .slice(0, 3)
+                  .map((rp) => (
+                    <div key={rp.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                          [{formatReportTargetLabel(rp.target_type)}] {rp.target?.title || rp.target?.body || rp.target_id}
+                        </div>
+                        <div className="text-slate-500 truncate">
+                          Reason: {rp.reason} · Reported by {rp.reporter_name}
+                          {rp.target?.author_name ? ` · Author: ${rp.target.author_name}` : ''}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTab('moderation')}
+                        className="px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 text-xs shrink-0 hover:bg-slate-50 dark:hover:bg-slate-800"
+                      >
+                        Inspect Report
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            </section>
+          )}
+        </div>
       )}
 
       {/* ACADEMIC STRUCTURE MANAGEMENT */}
@@ -1040,36 +1176,301 @@ export function AdminDashboard() {
             )}
           </section>
 
-          {/* Pending Opportunities & Donations & Reports */}
-          <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
-            <h2 className="text-sm font-semibold">Pending Opportunities, Donations & Open Reports</h2>
-            {overview.queues.pendingOpportunities.map((o) => (
-              <div key={o.id} className="py-2 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 text-xs">
-                <span>Opportunity: <strong>{o.title}</strong> ({o.organization})</span>
-                <div className="flex gap-2">
-                  <button type="button" onClick={async () => { await api.post(`/api/opportunities/${o.id}/review`, { decision: 'approved' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-emerald-700 text-white">Approve</button>
-                  <button type="button" onClick={async () => { await api.post(`/api/opportunities/${o.id}/review`, { decision: 'rejected' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-red-600 text-white">Reject</button>
+          {/* Pending Opportunities & Donations */}
+          {(overview.queues.pendingOpportunities.length > 0 || overview.queues.pendingDonations.length > 0) && (
+            <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
+              <h2 className="text-sm font-semibold">Pending Opportunities &amp; Donations</h2>
+              {overview.queues.pendingOpportunities.map((o) => (
+                <div key={o.id} className="py-2 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 text-xs">
+                  <span>Opportunity: <strong>{o.title}</strong> ({o.organization})</span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={async () => { await api.post(`/api/opportunities/${o.id}/review`, { decision: 'approved' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-emerald-700 text-white">Approve</button>
+                    <button type="button" onClick={async () => { await api.post(`/api/opportunities/${o.id}/review`, { decision: 'rejected' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-red-600 text-white">Reject</button>
+                  </div>
                 </div>
-              </div>
-            ))}
-            {overview.queues.pendingDonations.map((d) => (
-              <div key={d.id} className="py-2 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 text-xs">
-                <span>Donation Request: <strong>{d.title}</strong> by {d.requester_name}</span>
-                <div className="flex gap-2">
-                  <button type="button" onClick={async () => { await api.post(`/api/donations/${d.id}/review`, { decision: 'approved', verification_notes: 'Verified by moderator' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-emerald-700 text-white">Approve</button>
-                  <button type="button" onClick={async () => { await api.post(`/api/donations/${d.id}/review`, { decision: 'rejected' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-red-600 text-white">Reject</button>
+              ))}
+              {overview.queues.pendingDonations.map((d) => (
+                <div key={d.id} className="py-2 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 text-xs">
+                  <span>Donation Request: <strong>{d.title}</strong> by {d.requester_name}</span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={async () => { await api.post(`/api/donations/${d.id}/review`, { decision: 'approved', verification_notes: 'Verified by moderator' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-emerald-700 text-white">Approve</button>
+                    <button type="button" onClick={async () => { await api.post(`/api/donations/${d.id}/review`, { decision: 'rejected' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-red-600 text-white">Reject</button>
+                  </div>
                 </div>
+              ))}
+            </section>
+          )}
+
+          {/* Reported Content & Accounts */}
+          <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold flex items-center gap-2">
+                  <Flag className="w-4 h-4 text-red-600 dark:text-red-400" />
+                  Reported Content &amp; Accounts ({overview.queues.openReports.filter((r) => (reportFilter === 'open' ? r.status === 'open' : true)).length})
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Inspect the exact reported post, comment, resource, confession, or account before resolving or hiding content.
+                </p>
               </div>
-            ))}
-            {overview.queues.openReports.filter((r) => r.status === 'open').map((rp) => (
-              <div key={rp.id} className="py-2 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 text-xs">
-                <span>Report ({rp.target_type}): {rp.reason} — by {rp.reporter_name}</span>
-                <div className="flex gap-2">
-                  <button type="button" onClick={async () => { await api.patch(`/api/admin/reports/${rp.id}`, { status: 'resolved', resolution_notes: 'Reviewed by moderator' }); await loadOverview(); }} className="px-2.5 py-1 rounded bg-slate-900 dark:bg-blue-600 text-white">Resolve</button>
-                  <button type="button" onClick={async () => { await api.patch(`/api/admin/reports/${rp.id}`, { status: 'dismissed' }); await loadOverview(); }} className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700">Dismiss</button>
+              <div className="flex items-center gap-1.5">
+                {(['open', 'all'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setReportFilter(st)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium capitalize ${
+                      reportFilter === st
+                        ? 'bg-slate-900 text-white dark:bg-blue-600'
+                        : 'border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    {st === 'open' ? 'Open Reports' : 'All Recent'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {(() => {
+              const filteredReports = overview.queues.openReports.filter((r) =>
+                reportFilter === 'open' ? r.status === 'open' : true
+              );
+              if (filteredReports.length === 0) {
+                return (
+                  <p className="text-xs text-slate-500">
+                    {reportFilter === 'open' ? 'No open reports waiting review.' : 'No reports recorded yet.'}
+                  </p>
+                );
+              }
+              return (
+                <div className="space-y-4">
+                  {filteredReports.map((rp) => {
+                    const target = rp.target;
+                    const canHideTarget =
+                      Boolean(target?.exists) &&
+                      ['post', 'comment', 'confession', 'resource'].includes(rp.target_type) &&
+                      !target?.is_hidden &&
+                      target?.status !== 'rejected';
+
+                    return (
+                      <div
+                        key={rp.id}
+                        className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-4 space-y-3"
+                      >
+                        {/* Report Metadata Header */}
+                        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                          <div className="space-y-1 text-xs">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="px-2 py-0.5 rounded bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 font-semibold">
+                                {formatReportTargetLabel(rp.target_type)}
+                              </span>
+                              <span className="px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono uppercase text-[10px] text-slate-600 dark:text-slate-300">
+                                {rp.status}
+                              </span>
+                              {rp.created_at && (
+                                <span className="font-mono text-[11px] text-slate-400">
+                                  {formatRelativeDate(rp.created_at)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-slate-900 dark:text-slate-100 font-semibold">
+                              Reason: {rp.reason}
+                            </div>
+                            <div className="text-slate-500 dark:text-slate-400">
+                              Reported by{' '}
+                              {rp.reporter_username ? (
+                                <button
+                                  type="button"
+                                  onClick={() => navigate('profile', rp.reporter_username)}
+                                  className="font-medium text-slate-700 dark:text-slate-200 hover:underline"
+                                >
+                                  {rp.reporter_name} (@{rp.reporter_username})
+                                </button>
+                              ) : (
+                                <span className="font-medium text-slate-700 dark:text-slate-200">{rp.reporter_name}</span>
+                              )}
+                            </div>
+                            {rp.details && (
+                              <div className="text-slate-600 dark:text-slate-300">
+                                <span className="font-medium">Reporter Details:</span> {rp.details}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-400 shrink-0">
+                            ID: {rp.target_id.slice(0, 8)}
+                          </div>
+                        </div>
+
+                        {/* Exact Reported Item Preview */}
+                        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 space-y-2">
+                          {!target || !target.exists ? (
+                            <p className="text-xs text-slate-500 italic">
+                              Reported {formatReportTargetLabel(rp.target_type).toLowerCase()} is no longer available (already deleted or removed).
+                            </p>
+                          ) : (
+                            <>
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                                <div className="flex flex-wrap items-center gap-1.5 text-slate-500 dark:text-slate-400">
+                                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                                    {target.type === 'confession' ? 'Author: Anonymous Student' : 'Author:'}
+                                  </span>
+                                  {target.type !== 'confession' && (
+                                    target.author_username ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => navigate('profile', target.author_username || undefined)}
+                                        className="font-medium text-blue-700 dark:text-blue-400 hover:underline"
+                                      >
+                                        {target.author_name || 'Unknown'} (@{target.author_username})
+                                      </button>
+                                    ) : (
+                                      <span className="font-medium text-slate-700 dark:text-slate-300">
+                                        {target.author_name || 'Unknown'}
+                                      </span>
+                                    )
+                                  )}
+                                  {target.author_role && (
+                                    <span>· {formatRoleLabel(target.author_role as UserRole)}</span>
+                                  )}
+                                  {target.context_label && <span>· {target.context_label}</span>}
+                                  {target.created_at && (
+                                    <span className="font-mono text-[11px]">· {formatRelativeDate(target.created_at)}</span>
+                                  )}
+                                </div>
+                                {(target.is_hidden || (target.status && !['active', 'approved'].includes(target.status))) && (
+                                  <span className="px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 font-mono text-[10px] uppercase">
+                                    {target.status || 'hidden'}
+                                  </span>
+                                )}
+                              </div>
+
+                              {target.title && (
+                                <div className="text-sm font-semibold text-slate-900 dark:text-white">
+                                  {target.title}
+                                </div>
+                              )}
+                              {target.body && (
+                                <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed">
+                                  {target.body}
+                                </p>
+                              )}
+                              {target.image_url && (
+                                <img
+                                  src={resolveApiUrl(target.image_url)}
+                                  alt={target.title || 'Reported attachment'}
+                                  className="max-h-64 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
+                                />
+                              )}
+
+                              <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
+                                {target.community_slug && (
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate('communities', target.community_slug || undefined)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                  >
+                                    <ExternalLink className="w-3 h-3" /> Open Community
+                                  </button>
+                                )}
+                                {target.type === 'resource' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate('academic')}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                  >
+                                    <ExternalLink className="w-3 h-3" /> Open Academic Explorer
+                                  </button>
+                                )}
+                                {target.type === 'user' && target.author_username && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => navigate('profile', target.author_username || undefined)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                    >
+                                      <ExternalLink className="w-3 h-3" /> View Profile
+                                    </button>
+                                    {isAdmin && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setUserSearch(target.author_username || '');
+                                          setTab('users');
+                                        }}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                      >
+                                        Manage User Account
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                                {target.type === 'confession' && isSuperAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setVaultTargetId(target.id);
+                                      setVaultReason('');
+                                      setVaultResult(null);
+                                    }}
+                                    className="px-2.5 py-1 rounded border border-amber-500 text-amber-700 dark:text-amber-400"
+                                  >
+                                    Super Admin: Audited Identity Lookup
+                                  </button>
+                                )}
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Moderation Actions */}
+                        {rp.status === 'open' ? (
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                            <input
+                              type="text"
+                              value={reportNotes[rp.id] || ''}
+                              onChange={(e) => setReportNotes((prev) => ({ ...prev, [rp.id]: e.target.value }))}
+                              placeholder="Optional moderation resolution note..."
+                              className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs"
+                            />
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              {canHideTarget && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleResolveReport(rp.id, 'resolved', 'hide_target')}
+                                  className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700"
+                                >
+                                  Hide Content &amp; Resolve
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => void handleResolveReport(rp.id, 'resolved', 'none')}
+                                className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 text-white text-xs font-medium"
+                              >
+                                Resolve
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleResolveReport(rp.id, 'dismissed', 'none')}
+                                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs"
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          rp.resolution_notes && (
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                              <strong>Resolution Notes:</strong> {rp.resolution_notes}
+                            </div>
+                          )
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
-            ))}
+              );
+            })()}
           </section>
         </div>
       )}

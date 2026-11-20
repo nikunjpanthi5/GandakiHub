@@ -76,12 +76,296 @@ export function createAdminRouter(db: AppDatabase): Router {
         db.query(
           "SELECT d.*, u.display_name AS requester_name FROM donation_requests d JOIN profiles u ON u.id = d.requester_id WHERE d.status = 'pending' ORDER BY d.created_at ASC"
         ),
-        db.query(
-          `SELECT rp.*, u.display_name AS reporter_name
+        db.query<{
+          id: string;
+          reporter_id: string;
+          target_type: string;
+          target_id: string;
+          reason: string;
+          details: string;
+          status: string;
+          reviewed_by: string | null;
+          resolution_notes: string | null;
+          created_at: string;
+          reporter_name: string;
+          reporter_username: string;
+        }>(
+          `SELECT rp.*, u.display_name AS reporter_name, u.username AS reporter_username
            FROM reports rp JOIN profiles u ON u.id = rp.reporter_id
-           ORDER BY CASE WHEN rp.status = 'open' THEN 0 ELSE 1 END, rp.created_at DESC LIMIT 50`
+           ORDER BY CASE WHEN rp.status = 'open' THEN 0 ELSE 1 END, rp.created_at DESC LIMIT 100`
         ),
       ]);
+
+      // Resolve exact reported targets for every report (strictly preserving confession anonymity)
+      const postIds = Array.from(new Set(openReports.filter((r) => r.target_type === 'post' && isUuid(r.target_id)).map((r) => r.target_id)));
+      const commentIds = Array.from(new Set(openReports.filter((r) => r.target_type === 'comment' && isUuid(r.target_id)).map((r) => r.target_id)));
+      const resourceIds = Array.from(new Set(openReports.filter((r) => r.target_type === 'resource' && isUuid(r.target_id)).map((r) => r.target_id)));
+      const confessionIds = Array.from(new Set(openReports.filter((r) => r.target_type === 'confession' && isUuid(r.target_id)).map((r) => r.target_id)));
+      const userIds = Array.from(new Set(openReports.filter((r) => r.target_type === 'user' && isUuid(r.target_id)).map((r) => r.target_id)));
+
+      const [postTargets, commentTargets, resourceTargets, confessionTargets, userTargets] = await Promise.all([
+        postIds.length
+          ? db.query<{
+              id: string;
+              title: string;
+              body: string;
+              image_url: string | null;
+              is_hidden: boolean;
+              created_at: string;
+              community_name: string | null;
+              community_slug: string | null;
+              author_id: string | null;
+              author_name: string | null;
+              author_username: string | null;
+              author_role: string | null;
+            }>(
+              `SELECT p.id, p.title, p.body, p.image_url, p.is_hidden, p.created_at,
+                      c.name AS community_name, c.slug AS community_slug,
+                      a.id AS author_id, a.display_name AS author_name, a.username AS author_username, a.role AS author_role
+               FROM posts p
+               LEFT JOIN communities c ON c.id = p.community_id
+               LEFT JOIN profiles a ON a.id = p.author_id
+               WHERE p.id = ANY($1::uuid[])`,
+              [postIds]
+            )
+          : Promise.resolve([]),
+        commentIds.length
+          ? db.query<{
+              id: string;
+              body: string;
+              is_hidden: boolean;
+              created_at: string;
+              post_id: string;
+              post_title: string | null;
+              community_name: string | null;
+              community_slug: string | null;
+              author_id: string | null;
+              author_name: string | null;
+              author_username: string | null;
+              author_role: string | null;
+            }>(
+              `SELECT cm.id, cm.body, cm.is_hidden, cm.created_at, cm.post_id,
+                      p.title AS post_title, c.name AS community_name, c.slug AS community_slug,
+                      a.id AS author_id, a.display_name AS author_name, a.username AS author_username, a.role AS author_role
+               FROM comments cm
+               LEFT JOIN posts p ON p.id = cm.post_id
+               LEFT JOIN communities c ON c.id = p.community_id
+               LEFT JOIN profiles a ON a.id = cm.author_id
+               WHERE cm.id = ANY($1::uuid[])`,
+              [commentIds]
+            )
+          : Promise.resolve([]),
+        resourceIds.length
+          ? db.query<{
+              id: string;
+              title: string;
+              description: string;
+              status: string;
+              academic_year: string;
+              created_at: string;
+              program_code: string | null;
+              subject_name: string | null;
+              category_name: string | null;
+              author_id: string | null;
+              author_name: string | null;
+              author_username: string | null;
+              author_role: string | null;
+            }>(
+              `SELECT r.id, r.title, r.description, r.status, r.academic_year, r.created_at,
+                      p.code AS program_code, sub.name AS subject_name, rc.name AS category_name,
+                      a.id AS author_id, a.display_name AS author_name, a.username AS author_username, a.role AS author_role
+               FROM resources r
+               LEFT JOIN programs p ON p.id = r.program_id
+               LEFT JOIN subjects sub ON sub.id = r.subject_id
+               LEFT JOIN resource_categories rc ON rc.id = r.category_id
+               LEFT JOIN profiles a ON a.id = r.uploader_id
+               WHERE r.id = ANY($1::uuid[])`,
+              [resourceIds]
+            )
+          : Promise.resolve([]),
+        confessionIds.length
+          ? db.query<{
+              id: string;
+              title: string;
+              body: string;
+              image_url: string | null;
+              category: string;
+              status: string;
+              created_at: string;
+            }>(
+              `SELECT id, title, body, image_url, category, status, created_at
+               FROM confessions
+               WHERE id = ANY($1::uuid[])`,
+              [confessionIds]
+            )
+          : Promise.resolve([]),
+        userIds.length
+          ? db.query<{
+              id: string;
+              display_name: string;
+              username: string;
+              role: string;
+              bio: string;
+              account_status: string;
+              created_at: string;
+            }>(
+              `SELECT id, display_name, username, role, bio, account_status, created_at
+               FROM profiles
+               WHERE id = ANY($1::uuid[])`,
+              [userIds]
+            )
+          : Promise.resolve([]),
+      ]);
+
+      const postMap = new Map(postTargets.map((p) => [String(p.id), p]));
+      const commentMap = new Map(commentTargets.map((c) => [String(c.id), c]));
+      const resourceMap = new Map(resourceTargets.map((r) => [String(r.id), r]));
+      const confessionMap = new Map(confessionTargets.map((c) => [String(c.id), c]));
+      const userMap = new Map(userTargets.map((u) => [String(u.id), u]));
+
+      const enrichedReports = openReports.map((rp) => {
+        const tid = String(rp.target_id);
+        let target: Record<string, unknown> = {
+          exists: false,
+          type: rp.target_type,
+          id: tid,
+          title: null,
+          body: null,
+          image_url: null,
+          context_label: null,
+          community_slug: null,
+          post_id: null,
+          author_id: null,
+          author_name: null,
+          author_username: null,
+          author_role: null,
+          is_hidden: false,
+          status: 'deleted',
+          created_at: null,
+        };
+
+        if (rp.target_type === 'post') {
+          const p = postMap.get(tid);
+          if (p) {
+            target = {
+              exists: true,
+              type: 'post',
+              id: tid,
+              title: p.title || null,
+              body: p.body || null,
+              image_url: p.image_url || null,
+              context_label: p.community_name ? `in ${p.community_name}` : null,
+              community_slug: p.community_slug || null,
+              post_id: tid,
+              author_id: p.author_id || null,
+              author_name: p.author_name || null,
+              author_username: p.author_username || null,
+              author_role: p.author_role || null,
+              is_hidden: Boolean(p.is_hidden),
+              status: p.is_hidden ? 'hidden' : 'active',
+              created_at: p.created_at,
+            };
+          }
+        } else if (rp.target_type === 'comment') {
+          const c = commentMap.get(tid);
+          if (c) {
+            const ctxParts = [
+              c.post_title ? `on post "${c.post_title}"` : 'on discussion post',
+              c.community_name ? `in ${c.community_name}` : null,
+            ].filter(Boolean);
+            target = {
+              exists: true,
+              type: 'comment',
+              id: tid,
+              title: c.post_title ? `Comment on: ${c.post_title}` : 'Discussion Comment',
+              body: c.body,
+              image_url: null,
+              context_label: ctxParts.join(' · '),
+              community_slug: c.community_slug || null,
+              post_id: c.post_id,
+              author_id: c.author_id || null,
+              author_name: c.author_name || null,
+              author_username: c.author_username || null,
+              author_role: c.author_role || null,
+              is_hidden: Boolean(c.is_hidden),
+              status: c.is_hidden ? 'hidden' : 'active',
+              created_at: c.created_at,
+            };
+          }
+        } else if (rp.target_type === 'resource') {
+          const resItem = resourceMap.get(tid);
+          if (resItem) {
+            const ctxParts = [resItem.program_code, resItem.subject_name, resItem.category_name, resItem.academic_year].filter(Boolean);
+            target = {
+              exists: true,
+              type: 'resource',
+              id: tid,
+              title: resItem.title,
+              body: resItem.description || null,
+              image_url: null,
+              context_label: ctxParts.join(' · ') || null,
+              community_slug: null,
+              post_id: null,
+              author_id: resItem.author_id || null,
+              author_name: resItem.author_name || null,
+              author_username: resItem.author_username || null,
+              author_role: resItem.author_role || null,
+              is_hidden: resItem.status === 'rejected',
+              status: resItem.status,
+              created_at: resItem.created_at,
+            };
+          }
+        } else if (rp.target_type === 'confession') {
+          const cf = confessionMap.get(tid);
+          if (cf) {
+            target = {
+              exists: true,
+              type: 'confession',
+              id: tid,
+              title: cf.title || 'Anonymous Confession',
+              body: cf.body || null,
+              image_url: cf.image_url || null,
+              context_label: cf.category ? `Category: ${cf.category}` : 'Confessions',
+              community_slug: null,
+              post_id: null,
+              author_id: null,
+              author_name: 'Anonymous Student',
+              author_username: null,
+              author_role: null,
+              is_hidden: cf.status === 'rejected',
+              status: cf.status,
+              created_at: cf.created_at,
+            };
+          }
+        } else if (rp.target_type === 'user') {
+          const u = userMap.get(tid);
+          if (u) {
+            target = {
+              exists: true,
+              type: 'user',
+              id: tid,
+              title: `${u.display_name} (@${u.username})`,
+              body: u.bio || 'No biography set.',
+              image_url: null,
+              context_label: `Account status: ${u.account_status}`,
+              community_slug: null,
+              post_id: null,
+              author_id: u.id,
+              author_name: u.display_name,
+              author_username: u.username,
+              author_role: u.role,
+              is_hidden: u.account_status !== 'active',
+              status: u.account_status,
+              created_at: u.created_at,
+            };
+          }
+        }
+
+        return {
+          ...rp,
+          target,
+        };
+      });
 
       let pending_staff_verifications = 0;
       let pendingStaffVerifications: Array<Record<string, unknown>> = [];
@@ -128,7 +412,7 @@ export function createAdminRouter(db: AppDatabase): Router {
           pendingConfessions,
           pendingOpportunities,
           pendingDonations,
-          openReports,
+          openReports: enrichedReports,
           pendingStaffVerifications,
         },
       });
@@ -382,22 +666,55 @@ export function createAdminRouter(db: AppDatabase): Router {
     }
   });
 
-  // Resolve report
+  // Resolve report (optionally hiding reported content)
   router.patch('/reports/:id', requireModerator, async (req: AuthenticatedRequest, res, next) => {
     try {
       if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Report not found.' });
       const parsed = z
-        .object({ status: z.enum(['resolved', 'dismissed']), resolution_notes: z.string().max(400).default('') })
+        .object({
+          status: z.enum(['resolved', 'dismissed']),
+          resolution_notes: z.string().max(400).default(''),
+          action: z.enum(['none', 'hide_target']).default('none'),
+        })
         .safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: 'Invalid report resolution.' });
 
-      await db.execute(
-        'UPDATE reports SET status = $1, reviewed_by = $2, resolution_notes = $3 WHERE id = $4',
-        [parsed.data.status, req.user!.id, parsed.data.resolution_notes.trim() || null, req.params.id]
+      const existing = await db.queryOne<{ id: string; target_type: string; target_id: string; status: string }>(
+        'SELECT id, target_type, target_id, status FROM reports WHERE id = $1',
+        [req.params.id]
       );
-      await writeAuditLog(db, req.user!.id, `report_${parsed.data.status}`, 'report', req.params.id, {
-        resolution_notes: parsed.data.resolution_notes,
-      });
+      if (!existing) return res.status(404).json({ error: 'Report not found.' });
+
+      await db.transaction(
+        async (tx) => {
+          await tx.execute(
+            'UPDATE reports SET status = $1, reviewed_by = $2, resolution_notes = $3 WHERE id = $4',
+            [parsed.data.status, req.user!.id, parsed.data.resolution_notes.trim() || null, req.params.id]
+          );
+
+          if (parsed.data.action === 'hide_target' && parsed.data.status === 'resolved' && isUuid(existing.target_id)) {
+            if (existing.target_type === 'post') {
+              await tx.execute('UPDATE posts SET is_hidden = TRUE, updated_at = NOW() WHERE id = $1', [existing.target_id]);
+            } else if (existing.target_type === 'comment') {
+              await tx.execute('UPDATE comments SET is_hidden = TRUE WHERE id = $1', [existing.target_id]);
+            } else if (existing.target_type === 'confession') {
+              await tx.execute("UPDATE confessions SET status = 'rejected' WHERE id = $1", [existing.target_id]);
+            } else if (existing.target_type === 'resource') {
+              await tx.execute("UPDATE resources SET status = 'rejected', updated_at = NOW() WHERE id = $1", [
+                existing.target_id,
+              ]);
+            }
+          }
+
+          await writeAuditLog(tx, req.user!.id, `report_${parsed.data.status}`, 'report', req.params.id, {
+            target_type: existing.target_type,
+            target_id: existing.target_id,
+            action: parsed.data.action,
+            resolution_notes: parsed.data.resolution_notes,
+          });
+        },
+        { trustedServer: true, actorId: req.user!.id }
+      );
       return res.json({ ok: true });
     } catch (err) {
       return next(err);

@@ -5,6 +5,7 @@ import {
   Calendar,
   ExternalLink,
   FileWarning,
+  Flag,
   GraduationCap,
   HeartHandshake,
   Lightbulb,
@@ -37,6 +38,9 @@ export function ConfessionsView() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [category, setCategory] = useState('Campus Life');
   const [commentMap, setCommentMap] = useState<Record<string, string>>({});
+  const [reportConfessionId, setReportConfessionId] = useState<string | null>(null);
+  const [reportReason, setReportReason] = useState('Harassment or abusive behavior');
+  const [reportDetails, setReportDetails] = useState('');
 
   const load = useCallback(async () => {
     const data = await api.get<{ confessions: ConfessionWithComments[] }>('/api/confessions');
@@ -86,6 +90,24 @@ export function ConfessionsView() {
       await load();
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not post comment.', 'error');
+    }
+  }
+
+  async function submitConfessionReport(e: React.FormEvent) {
+    e.preventDefault();
+    if (!reportConfessionId) return;
+    try {
+      await api.post('/api/reports', {
+        target_type: 'confession',
+        target_id: reportConfessionId,
+        reason: reportReason,
+        details: reportDetails.trim(),
+      });
+      setReportConfessionId(null);
+      setReportDetails('');
+      notify('Confession reported for moderator review.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not submit report.', 'error');
     }
   }
 
@@ -164,12 +186,22 @@ export function ConfessionsView() {
                 className="max-h-96 w-auto rounded-lg border border-slate-200 dark:border-slate-800 object-contain bg-slate-50 dark:bg-slate-950"
               />
             )}
-            <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-              <button type="button" onClick={() => void react(c.id, 'support')} className="px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-mono tabular-nums">
-                Support ({c.reaction_support})
-              </button>
-              <button type="button" onClick={() => void react(c.id, 'relate')} className="px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-mono tabular-nums">
-                Relate ({c.reaction_relate})
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+              <div className="flex flex-wrap items-center gap-3">
+                <button type="button" onClick={() => void react(c.id, 'support')} className="px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-mono tabular-nums">
+                  Support ({c.reaction_support})
+                </button>
+                <button type="button" onClick={() => void react(c.id, 'relate')} className="px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-mono tabular-nums">
+                  Relate ({c.reaction_relate})
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => (user ? setReportConfessionId(c.id) : setAuthModalOpen(true))}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+                aria-label="Report confession"
+              >
+                <Flag className="w-3.5 h-3.5" /> Report
               </button>
             </div>
             <div className="space-y-2 pt-2">
@@ -196,6 +228,52 @@ export function ConfessionsView() {
           ))
         )}
       </div>
+      {reportConfessionId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <form onSubmit={submitConfessionReport} className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
+            <h3 className="text-base font-semibold">Report Confession</h3>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Reason</label>
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
+              >
+                <option>Harassment or abusive behavior</option>
+                <option>Doxxing or personal identity exposure</option>
+                <option>Self-harm or campus safety concern</option>
+                <option>Spam or misleading content</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Additional Details (Optional)</label>
+              <textarea
+                rows={3}
+                maxLength={600}
+                value={reportDetails}
+                onChange={(e) => setReportDetails(e.target.value)}
+                placeholder="Provide context for moderators..."
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setReportConfessionId(null);
+                  setReportDetails('');
+                }}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs"
+              >
+                Cancel
+              </button>
+              <button type="submit" className="px-4 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium">
+                Submit Report
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
