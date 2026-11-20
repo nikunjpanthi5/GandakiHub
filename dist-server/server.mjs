@@ -173,12 +173,18 @@ async function getAuthUserFromDb(db, userId) {
   } catch {
   }
   const role = row.role;
+  const rawPrivacy = row.privacy_settings && typeof row.privacy_settings === "object" ? row.privacy_settings : {};
+  const profileExt = rawPrivacy._profile_ext && typeof rawPrivacy._profile_ext === "object" ? rawPrivacy._profile_ext : {};
+  const deptVal = row.department != null ? String(row.department) : typeof profileExt.department === "string" && profileExt.department ? profileExt.department : null;
+  const studentIdVal = row.student_id != null ? String(row.student_id) : typeof profileExt.student_id === "string" && profileExt.student_id ? profileExt.student_id : null;
+  const staffPositionVal = row.staff_position != null ? String(row.staff_position) : typeof profileExt.staff_position === "string" && profileExt.staff_position ? profileExt.staff_position : null;
+  const designationVal = row.designation != null ? String(row.designation) : typeof profileExt.designation === "string" && profileExt.designation ? profileExt.designation : null;
   const hasAcademic = Boolean(row.program_id && row.semester_id);
-  const hasStaffInfo = Boolean(row.staff_position && row.department);
+  const hasStaffInfo = Boolean(staffPositionVal && deptVal);
   const hasBio = Boolean(String(row.bio || "").trim().length > 0);
   const hasAvatar = Boolean(row.avatar_url);
   const hasInterests = Array.isArray(row.interests) && row.interests.length > 0;
-  const hasDeptOrId = Boolean(row.department || row.student_id);
+  const hasDeptOrId = Boolean(deptVal || studentIdVal);
   let completionPct = 25;
   if (hasAcademic || hasStaffInfo) completionPct += 35;
   else if (row.program_id || hasDeptOrId) completionPct += 15;
@@ -186,7 +192,7 @@ async function getAuthUserFromDb(db, userId) {
   if (hasInterests) completionPct += 15;
   if (hasAvatar) completionPct += 10;
   completionPct = Math.min(100, completionPct);
-  const profileCompleted = Boolean(row.profile_completed) || hasAcademic || hasStaffInfo || role === "super_admin" || role === "admin" || role === "verified_teacher";
+  const profileCompleted = Boolean(row.profile_completed) || Boolean(profileExt.profile_completed) || hasAcademic || hasStaffInfo || hasBio || hasInterests || hasAvatar || Boolean(row.program_id || deptVal || studentIdVal) || role === "super_admin" || role === "admin" || role === "verified_teacher";
   return {
     id: String(row.id),
     email: String(row.email),
@@ -203,10 +209,10 @@ async function getAuthUserFromDb(db, userId) {
     program_name: row.program_name ? String(row.program_name) : null,
     semester_id: row.semester_id ? String(row.semester_id) : null,
     semester_name: row.semester_name ? String(row.semester_name) : null,
-    department: row.department ? String(row.department) : null,
-    student_id: row.student_id ? String(row.student_id) : null,
-    staff_position: row.staff_position ? String(row.staff_position) : null,
-    designation: row.designation ? String(row.designation) : null,
+    department: deptVal,
+    student_id: studentIdVal,
+    staff_position: staffPositionVal,
+    designation: designationVal,
     profile_completed: profileCompleted,
     profile_completion_pct: completionPct,
     staff_verification_status: staffVerificationStatus,
@@ -218,9 +224,9 @@ async function getAuthUserFromDb(db, userId) {
       events: true,
       announcements: true
     },
-    privacy_settings: row.privacy_settings || {
-      show_program: true,
-      allow_connection_requests: true
+    privacy_settings: {
+      show_program: rawPrivacy.show_program !== false,
+      allow_connection_requests: rawPrivacy.allow_connection_requests !== false
     },
     account_status: row.account_status || "active",
     moderated_community_ids: modRows.map((m) => String(m.community_id)),
@@ -2233,7 +2239,8 @@ var profileUpdateSchema = z3.object({
   privacy_settings: z3.object({
     show_program: z3.boolean(),
     allow_connection_requests: z3.boolean()
-  }).optional()
+  }).optional(),
+  profile_completed: z3.boolean().optional()
 });
 function getConfiguredSuperAdminEmail() {
   const val = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
@@ -2778,10 +2785,11 @@ function createAuthRouter(db) {
       const supportsExtendedCols = await hasMigration003ProfileCols(db);
       const nextDept = d.department !== void 0 ? d.department?.trim() || null : u.department ?? null;
       const nextStudentId = d.student_id !== void 0 ? d.student_id?.trim() || null : u.student_id ?? null;
-      const nextBio = d.bio !== void 0 ? d.bio.trim() : u.bio;
-      const willComplete = Boolean(
-        nextProgramId && nextSemesterId || nextDept && (nextStudentId || nextBio)
-      );
+      const nextCompleted = Boolean(u.profile_completed || (d.profile_completed ?? true));
+      const basePrivacy = {
+        show_program: d.privacy_settings?.show_program ?? u.privacy_settings.show_program,
+        allow_connection_requests: d.privacy_settings?.allow_connection_requests ?? u.privacy_settings.allow_connection_requests
+      };
       const updated = await db.transaction(
         async (tx) => {
           if (supportsExtendedCols) {
@@ -2796,7 +2804,7 @@ function createAuthRouter(db) {
                 profile_completed = profile_completed OR $7,
                 interests = COALESCE($8::text[], interests),
                 notification_prefs = COALESCE($9::jsonb, notification_prefs),
-                privacy_settings = COALESCE($10::jsonb, privacy_settings),
+                privacy_settings = $10::jsonb,
                 updated_at = NOW()
                WHERE id = $11`,
               [
@@ -2806,14 +2814,22 @@ function createAuthRouter(db) {
                 nextSemesterId,
                 nextDept,
                 nextStudentId,
-                willComplete,
+                nextCompleted,
                 d.interests ?? null,
                 d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                JSON.stringify(basePrivacy),
                 u.id
               ]
             );
           } else {
+            const fallbackPrivacy = {
+              ...basePrivacy,
+              _profile_ext: {
+                department: nextDept,
+                student_id: nextStudentId,
+                profile_completed: nextCompleted
+              }
+            };
             await tx.execute(
               `UPDATE profiles SET
                 display_name = COALESCE($1, display_name),
@@ -2822,7 +2838,7 @@ function createAuthRouter(db) {
                 semester_id = $4,
                 interests = COALESCE($5::text[], interests),
                 notification_prefs = COALESCE($6::jsonb, notification_prefs),
-                privacy_settings = COALESCE($7::jsonb, privacy_settings),
+                privacy_settings = $7::jsonb,
                 updated_at = NOW()
                WHERE id = $8`,
               [
@@ -2832,7 +2848,7 @@ function createAuthRouter(db) {
                 nextSemesterId,
                 d.interests ?? null,
                 d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                JSON.stringify(fallbackPrivacy),
                 u.id
               ]
             );
@@ -3077,8 +3093,14 @@ function createAuthRouter(db) {
         [req.params.username.toLowerCase()]
       );
       if (!row) return res.status(404).json({ error: "User profile not found." });
-      const privacy = row.privacy_settings || { show_program: true };
+      const rawPrivacy = row.privacy_settings && typeof row.privacy_settings === "object" ? row.privacy_settings : {};
+      const profileExt = rawPrivacy._profile_ext && typeof rawPrivacy._profile_ext === "object" ? rawPrivacy._profile_ext : {};
+      const privacy = { show_program: rawPrivacy.show_program !== false };
       const isSelf = req.user?.id === String(row.id);
+      const deptVal = row.department != null ? String(row.department) : typeof profileExt.department === "string" && profileExt.department ? profileExt.department : null;
+      const studentIdVal = row.student_id != null ? String(row.student_id) : typeof profileExt.student_id === "string" && profileExt.student_id ? profileExt.student_id : null;
+      const staffPosVal = row.staff_position != null ? String(row.staff_position) : typeof profileExt.staff_position === "string" && profileExt.staff_position ? profileExt.staff_position : null;
+      const designationVal = row.designation != null ? String(row.designation) : typeof profileExt.designation === "string" && profileExt.designation ? profileExt.designation : null;
       const posts = await db.query(
         `SELECT p.id, p.title, p.created_at, p.upvote_count, p.comment_count, c.name AS community_name, c.slug AS community_slug
          FROM posts p JOIN communities c ON c.id = p.community_id
@@ -3109,10 +3131,10 @@ function createAuthRouter(db) {
           program_name: privacy.show_program || isSelf ? row.program_name : null,
           semester_id: privacy.show_program || isSelf ? row.semester_id : null,
           semester_name: privacy.show_program || isSelf ? row.semester_name : null,
-          department: privacy.show_program || isSelf ? row.department ? String(row.department) : null : null,
-          student_id: isSelf ? row.student_id ? String(row.student_id) : null : null,
-          staff_position: row.role === "verified_teacher" ? row.staff_position ? String(row.staff_position) : null : null,
-          designation: row.role === "verified_teacher" ? row.designation ? String(row.designation) : null : null,
+          department: privacy.show_program || isSelf ? deptVal : null,
+          student_id: isSelf ? studentIdVal : null,
+          staff_position: row.role === "verified_teacher" ? staffPosVal : null,
+          designation: row.role === "verified_teacher" ? designationVal : null,
           interests: Array.isArray(row.interests) ? row.interests : [],
           account_status: row.account_status,
           created_at: new Date(String(row.created_at)).toISOString()
@@ -6035,35 +6057,76 @@ function createSupabaseStorage(supabaseUrl, serviceRoleKey, bucket = process.env
   const client = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false }
   });
+  const candidateBuckets = Array.from(
+    new Set([bucket.trim(), "gandakihub-private", "gandakihub"].filter(Boolean))
+  );
+  let resolvedUploadBucket = null;
+  async function resolveUploadBucket() {
+    if (resolvedUploadBucket) return resolvedUploadBucket;
+    try {
+      const { data: existingBuckets } = await client.storage.listBuckets();
+      if (existingBuckets && existingBuckets.length > 0) {
+        const names = new Set(existingBuckets.map((b) => b.name));
+        for (const candidate of candidateBuckets) {
+          if (names.has(candidate)) {
+            resolvedUploadBucket = candidate;
+            return candidate;
+          }
+        }
+      }
+    } catch {
+    }
+    resolvedUploadBucket = candidateBuckets[0] || "gandakihub-private";
+    return resolvedUploadBucket;
+  }
   return {
     kind: "supabase",
-    bucket,
+    bucket: candidateBuckets[0] || "gandakihub-private",
     async uploadPrivate(objectPath, buffer, contentType) {
-      const { error } = await client.storage.from(bucket).upload(objectPath, buffer, {
+      const targetBucket = await resolveUploadBucket();
+      const { error } = await client.storage.from(targetBucket).upload(objectPath, buffer, {
         contentType,
         upsert: false
       });
-      if (error) {
-        throw new Error(`Supabase Storage upload failed: ${error.message}`);
+      if (!error) return;
+      for (const fallbackBucket of candidateBuckets) {
+        if (fallbackBucket === targetBucket) continue;
+        const retry = await client.storage.from(fallbackBucket).upload(objectPath, buffer, {
+          contentType,
+          upsert: false
+        });
+        if (!retry.error) {
+          resolvedUploadBucket = fallbackBucket;
+          return;
+        }
       }
+      throw new Error(`Supabase Storage upload failed: ${error.message}`);
     },
     async downloadPrivate(objectPath) {
-      const { data, error } = await client.storage.from(bucket).download(objectPath);
-      if (error || !data) {
-        return null;
+      for (const targetBucket of candidateBuckets) {
+        const { data, error } = await client.storage.from(targetBucket).download(objectPath);
+        if (!error && data) {
+          const ab = await data.arrayBuffer();
+          return Buffer.from(ab);
+        }
       }
-      const ab = await data.arrayBuffer();
-      return Buffer.from(ab);
+      return null;
     },
     async createSignedUrl(objectPath, expiresInSeconds = 60, downloadFilename) {
-      const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, expiresInSeconds, downloadFilename ? { download: downloadFilename } : void 0);
-      if (error || !data?.signedUrl) {
-        return null;
+      for (const targetBucket of candidateBuckets) {
+        const { data, error } = await client.storage.from(targetBucket).createSignedUrl(
+          objectPath,
+          expiresInSeconds,
+          downloadFilename ? { download: downloadFilename } : void 0
+        );
+        if (!error && data?.signedUrl) {
+          return data.signedUrl;
+        }
       }
-      return data.signedUrl;
+      return null;
     },
     async deletePrivate(objectPath) {
-      await client.storage.from(bucket).remove([objectPath]);
+      await Promise.all(candidateBuckets.map((targetBucket) => client.storage.from(targetBucket).remove([objectPath])));
     }
   };
 }

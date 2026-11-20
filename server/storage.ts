@@ -18,41 +18,88 @@ export function createSupabaseStorage(
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
+  const candidateBuckets = Array.from(
+    new Set([bucket.trim(), 'gandakihub-private', 'gandakihub'].filter(Boolean))
+  );
+  let resolvedUploadBucket: string | null = null;
+
+  async function resolveUploadBucket(): Promise<string> {
+    if (resolvedUploadBucket) return resolvedUploadBucket;
+    try {
+      const { data: existingBuckets } = await client.storage.listBuckets();
+      if (existingBuckets && existingBuckets.length > 0) {
+        const names = new Set(existingBuckets.map((b) => b.name));
+        for (const candidate of candidateBuckets) {
+          if (names.has(candidate)) {
+            resolvedUploadBucket = candidate;
+            return candidate;
+          }
+        }
+      }
+    } catch {
+      // Fall through to primary configured bucket
+    }
+    resolvedUploadBucket = candidateBuckets[0] || 'gandakihub-private';
+    return resolvedUploadBucket;
+  }
+
   return {
     kind: 'supabase',
-    bucket,
+    bucket: candidateBuckets[0] || 'gandakihub-private',
     async uploadPrivate(objectPath: string, buffer: Buffer, contentType: string): Promise<void> {
-      const { error } = await client.storage.from(bucket).upload(objectPath, buffer, {
+      const targetBucket = await resolveUploadBucket();
+      const { error } = await client.storage.from(targetBucket).upload(objectPath, buffer, {
         contentType,
         upsert: false,
       });
-      if (error) {
-        throw new Error(`Supabase Storage upload failed: ${error.message}`);
+      if (!error) return;
+
+      // Retry across remaining candidate buckets if the primary bucket is missing
+      for (const fallbackBucket of candidateBuckets) {
+        if (fallbackBucket === targetBucket) continue;
+        const retry = await client.storage.from(fallbackBucket).upload(objectPath, buffer, {
+          contentType,
+          upsert: false,
+        });
+        if (!retry.error) {
+          resolvedUploadBucket = fallbackBucket;
+          return;
+        }
       }
+
+      throw new Error(`Supabase Storage upload failed: ${error.message}`);
     },
     async downloadPrivate(objectPath: string): Promise<Buffer | null> {
-      const { data, error } = await client.storage.from(bucket).download(objectPath);
-      if (error || !data) {
-        return null;
+      for (const targetBucket of candidateBuckets) {
+        const { data, error } = await client.storage.from(targetBucket).download(objectPath);
+        if (!error && data) {
+          const ab = await data.arrayBuffer();
+          return Buffer.from(ab);
+        }
       }
-      const ab = await data.arrayBuffer();
-      return Buffer.from(ab);
+      return null;
     },
     async createSignedUrl(
       objectPath: string,
       expiresInSeconds = 60,
       downloadFilename?: string
     ): Promise<string | null> {
-      const { data, error } = await client.storage
-        .from(bucket)
-        .createSignedUrl(objectPath, expiresInSeconds, downloadFilename ? { download: downloadFilename } : undefined);
-      if (error || !data?.signedUrl) {
-        return null;
+      for (const targetBucket of candidateBuckets) {
+        const { data, error } = await client.storage
+          .from(targetBucket)
+          .createSignedUrl(
+            objectPath,
+            expiresInSeconds,
+            downloadFilename ? { download: downloadFilename } : undefined
+          );
+        if (!error && data?.signedUrl) {
+          return data.signedUrl;
+        }
       }
-      return data.signedUrl;
+      return null;
     },
     async deletePrivate(objectPath: string): Promise<void> {
-      await client.storage.from(bucket).remove([objectPath]);
+      await Promise.all(candidateBuckets.map((targetBucket) => client.storage.from(targetBucket).remove([objectPath])));
     },
   };
 }

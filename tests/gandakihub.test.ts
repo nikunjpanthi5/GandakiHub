@@ -1068,12 +1068,131 @@ describe('GandakiHub Full-Stack PostgreSQL Integration & Security Suite', () => 
       expect(patchRes.data.user.profile_completed).toBe(true);
       expect(patchRes.data.user.profile_completion_pct).toBe(90);
 
+      // Re-fetching /api/auth/me and self profile preserves department, student_id, and profile_completed
+      const meCheck = await req('/api/auth/me', { cookie: studentCookie });
+      expect(meCheck.status).toBe(200);
+      expect(meCheck.data.user.department).toBe('School of Information Technology');
+      expect(meCheck.data.user.student_id).toBe('GU-BIT-2081-014');
+      expect(meCheck.data.user.profile_completed).toBe(true);
+
+      const selfView = await req(`/api/auth/users/${encodeURIComponent(studentUsername)}`, {
+        cookie: studentCookie,
+      });
+      expect(selfView.status).toBe(200);
+      expect(selfView.data.profile.department).toBe('School of Information Technology');
+      expect(selfView.data.profile.student_id).toBe('GU-BIT-2081-014');
+
       // Public profile view exposes student_id only to self
       const otherView = await req(`/api/auth/users/${encodeURIComponent(studentUsername)}`, {
         cookie: otherStudentCookie,
       });
       expect(otherView.status).toBe(200);
       expect(otherView.data.profile.student_id).toBeNull();
+    });
+
+    it('marks profile_completed=true even when optional GU ID and department are omitted', async () => {
+      const minimalAcc = await registerAndVerify({
+        email: 'minimal.profile@gandakiuniversity.edu.np',
+        full_name: 'Minimal Profile User',
+      });
+      expect(minimalAcc.user.profile_completed).toBe(false);
+
+      const saveWithoutOptional = await req('/api/auth/profile', {
+        method: 'PATCH',
+        cookie: minimalAcc.cookie,
+        json: {
+          display_name: 'Minimal Profile User',
+        },
+      });
+      expect(saveWithoutOptional.status).toBe(200);
+      expect(saveWithoutOptional.data.user.profile_completed).toBe(true);
+      expect(saveWithoutOptional.data.user.department).toBeNull();
+      expect(saveWithoutOptional.data.user.student_id).toBeNull();
+
+      const meAfter = await req('/api/auth/me', { cookie: minimalAcc.cookie });
+      expect(meAfter.status).toBe(200);
+      expect(meAfter.data.user.profile_completed).toBe(true);
+    });
+
+    it('persists department, GU ID (student_id), and profile_completed even before migration 003 is applied', async () => {
+      const pg002 = new PGlite({ extensions: { pg_trgm } });
+      const migration002 = fs.readFileSync(
+        path.resolve(process.cwd(), 'supabase', 'migrations', '002_complete_production_schema.sql'),
+        'utf8'
+      );
+      await pg002.exec(migration002);
+      const db002 = createPGliteDatabase(pg002);
+      await seedIfEmpty(db002);
+      const app002 = createApiApp(db002, createMemoryStorage());
+
+      const srv002 = await new Promise<http.Server>((resolve) => {
+        const s = app002.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const port = (srv002.address() as { port: number }).port;
+      const url002 = `http://127.0.0.1:${port}`;
+
+      try {
+        const reg = await fetch(`${url002}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            full_name: 'Pre003 Student',
+            email: 'pre003@gandakiuniversity.edu.np',
+            password: 'Password123',
+            confirm_password: 'Password123',
+          }),
+        });
+        const regJson = (await reg.json()) as { devOtpPreview: string };
+        const ver = await fetch(`${url002}/api/auth/verify-otp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'pre003@gandakiuniversity.edu.np',
+            code: regJson.devOtpPreview,
+            purpose: 'verify_email',
+          }),
+        });
+        const verJson = (await ver.json()) as { sessionToken: string; user: { username: string } };
+
+        const patch = await fetch(`${url002}/api/auth/profile`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${verJson.sessionToken}`,
+          },
+          body: JSON.stringify({
+            department: 'School of Engineering',
+            student_id: 'GU-ENG-2081-009',
+          }),
+        });
+        expect(patch.status).toBe(200);
+        const patchJson = (await patch.json()) as {
+          user: { department: string; student_id: string; profile_completed: boolean };
+        };
+        expect(patchJson.user.department).toBe('School of Engineering');
+        expect(patchJson.user.student_id).toBe('GU-ENG-2081-009');
+        expect(patchJson.user.profile_completed).toBe(true);
+
+        const me = await fetch(`${url002}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${verJson.sessionToken}` },
+        });
+        const meJson = (await me.json()) as {
+          user: { department: string; student_id: string; profile_completed: boolean };
+        };
+        expect(meJson.user.department).toBe('School of Engineering');
+        expect(meJson.user.student_id).toBe('GU-ENG-2081-009');
+        expect(meJson.user.profile_completed).toBe(true);
+
+        const prof = await fetch(`${url002}/api/auth/users/${encodeURIComponent(verJson.user.username)}`, {
+          headers: { Authorization: `Bearer ${verJson.sessionToken}` },
+        });
+        const profJson = (await prof.json()) as { profile: { department: string; student_id: string } };
+        expect(profJson.profile.department).toBe('School of Engineering');
+        expect(profJson.profile.student_id).toBe('GU-ENG-2081-009');
+      } finally {
+        await new Promise<void>((resolve) => srv002.close(() => resolve()));
+        await db002.close();
+      }
     });
 
     it('keeps staff verification requests pending without auto-elevating role until approved by admin', async () => {

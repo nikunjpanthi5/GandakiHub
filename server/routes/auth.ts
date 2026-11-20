@@ -98,6 +98,7 @@ const profileUpdateSchema = z.object({
       allow_connection_requests: z.boolean(),
     })
     .optional(),
+  profile_completed: z.boolean().optional(),
 });
 
 function getConfiguredSuperAdminEmail(): string | null {
@@ -782,10 +783,13 @@ export function createAuthRouter(db: AppDatabase): Router {
       const supportsExtendedCols = await hasMigration003ProfileCols(db);
       const nextDept = d.department !== undefined ? (d.department?.trim() || null) : (u.department ?? null);
       const nextStudentId = d.student_id !== undefined ? (d.student_id?.trim() || null) : (u.student_id ?? null);
-      const nextBio = d.bio !== undefined ? d.bio.trim() : u.bio;
-      const willComplete = Boolean(
-        (nextProgramId && nextSemesterId) || (nextDept && (nextStudentId || nextBio))
-      );
+      const nextCompleted = Boolean(u.profile_completed || (d.profile_completed ?? true));
+
+      const basePrivacy = {
+        show_program: d.privacy_settings?.show_program ?? u.privacy_settings.show_program,
+        allow_connection_requests:
+          d.privacy_settings?.allow_connection_requests ?? u.privacy_settings.allow_connection_requests,
+      };
 
       // Uses actorId WITHOUT trustedServer so PostgreSQL trigger protects role/status/verification fields
       const updated = await db.transaction(
@@ -802,7 +806,7 @@ export function createAuthRouter(db: AppDatabase): Router {
                 profile_completed = profile_completed OR $7,
                 interests = COALESCE($8::text[], interests),
                 notification_prefs = COALESCE($9::jsonb, notification_prefs),
-                privacy_settings = COALESCE($10::jsonb, privacy_settings),
+                privacy_settings = $10::jsonb,
                 updated_at = NOW()
                WHERE id = $11`,
               [
@@ -812,14 +816,22 @@ export function createAuthRouter(db: AppDatabase): Router {
                 nextSemesterId,
                 nextDept,
                 nextStudentId,
-                willComplete,
+                nextCompleted,
                 d.interests ?? null,
                 d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                JSON.stringify(basePrivacy),
                 u.id,
               ]
             );
           } else {
+            const fallbackPrivacy = {
+              ...basePrivacy,
+              _profile_ext: {
+                department: nextDept,
+                student_id: nextStudentId,
+                profile_completed: nextCompleted,
+              },
+            };
             await tx.execute(
               `UPDATE profiles SET
                 display_name = COALESCE($1, display_name),
@@ -828,7 +840,7 @@ export function createAuthRouter(db: AppDatabase): Router {
                 semester_id = $4,
                 interests = COALESCE($5::text[], interests),
                 notification_prefs = COALESCE($6::jsonb, notification_prefs),
-                privacy_settings = COALESCE($7::jsonb, privacy_settings),
+                privacy_settings = $7::jsonb,
                 updated_at = NOW()
                WHERE id = $8`,
               [
@@ -838,7 +850,7 @@ export function createAuthRouter(db: AppDatabase): Router {
                 nextSemesterId,
                 d.interests ?? null,
                 d.notification_prefs ? JSON.stringify(d.notification_prefs) : null,
-                d.privacy_settings ? JSON.stringify(d.privacy_settings) : null,
+                JSON.stringify(fallbackPrivacy),
                 u.id,
               ]
             );
@@ -1124,8 +1136,40 @@ export function createAuthRouter(db: AppDatabase): Router {
 
       if (!row) return res.status(404).json({ error: 'User profile not found.' });
 
-      const privacy = (row.privacy_settings as { show_program?: boolean }) || { show_program: true };
+      const rawPrivacy =
+        row.privacy_settings && typeof row.privacy_settings === 'object'
+          ? (row.privacy_settings as Record<string, unknown>)
+          : {};
+      const profileExt =
+        rawPrivacy._profile_ext && typeof rawPrivacy._profile_ext === 'object'
+          ? (rawPrivacy._profile_ext as Record<string, unknown>)
+          : {};
+      const privacy = { show_program: rawPrivacy.show_program !== false };
       const isSelf = req.user?.id === String(row.id);
+      const deptVal =
+        row.department != null
+          ? String(row.department)
+          : typeof profileExt.department === 'string' && profileExt.department
+            ? profileExt.department
+            : null;
+      const studentIdVal =
+        row.student_id != null
+          ? String(row.student_id)
+          : typeof profileExt.student_id === 'string' && profileExt.student_id
+            ? profileExt.student_id
+            : null;
+      const staffPosVal =
+        row.staff_position != null
+          ? String(row.staff_position)
+          : typeof profileExt.staff_position === 'string' && profileExt.staff_position
+            ? profileExt.staff_position
+            : null;
+      const designationVal =
+        row.designation != null
+          ? String(row.designation)
+          : typeof profileExt.designation === 'string' && profileExt.designation
+            ? profileExt.designation
+            : null;
 
       const posts = await db.query(
         `SELECT p.id, p.title, p.created_at, p.upvote_count, p.comment_count, c.name AS community_name, c.slug AS community_slug
@@ -1159,10 +1203,10 @@ export function createAuthRouter(db: AppDatabase): Router {
           program_name: privacy.show_program || isSelf ? row.program_name : null,
           semester_id: privacy.show_program || isSelf ? row.semester_id : null,
           semester_name: privacy.show_program || isSelf ? row.semester_name : null,
-          department: privacy.show_program || isSelf ? (row.department ? String(row.department) : null) : null,
-          student_id: isSelf ? (row.student_id ? String(row.student_id) : null) : null,
-          staff_position: row.role === 'verified_teacher' ? (row.staff_position ? String(row.staff_position) : null) : null,
-          designation: row.role === 'verified_teacher' ? (row.designation ? String(row.designation) : null) : null,
+          department: privacy.show_program || isSelf ? deptVal : null,
+          student_id: isSelf ? studentIdVal : null,
+          staff_position: row.role === 'verified_teacher' ? staffPosVal : null,
+          designation: row.role === 'verified_teacher' ? designationVal : null,
           interests: Array.isArray(row.interests) ? row.interests : [],
           account_status: row.account_status,
           created_at: new Date(String(row.created_at)).toISOString(),

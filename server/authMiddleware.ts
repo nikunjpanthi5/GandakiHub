@@ -55,12 +55,46 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
   }
 
   const role = row.role as UserRole;
+  const rawPrivacy =
+    row.privacy_settings && typeof row.privacy_settings === 'object'
+      ? (row.privacy_settings as Record<string, unknown>)
+      : {};
+  const profileExt =
+    rawPrivacy._profile_ext && typeof rawPrivacy._profile_ext === 'object'
+      ? (rawPrivacy._profile_ext as Record<string, unknown>)
+      : {};
+
+  const deptVal =
+    row.department != null
+      ? String(row.department)
+      : typeof profileExt.department === 'string' && profileExt.department
+        ? profileExt.department
+        : null;
+  const studentIdVal =
+    row.student_id != null
+      ? String(row.student_id)
+      : typeof profileExt.student_id === 'string' && profileExt.student_id
+        ? profileExt.student_id
+        : null;
+  const staffPositionVal =
+    row.staff_position != null
+      ? String(row.staff_position)
+      : typeof profileExt.staff_position === 'string' && profileExt.staff_position
+        ? profileExt.staff_position
+        : null;
+  const designationVal =
+    row.designation != null
+      ? String(row.designation)
+      : typeof profileExt.designation === 'string' && profileExt.designation
+        ? profileExt.designation
+        : null;
+
   const hasAcademic = Boolean(row.program_id && row.semester_id);
-  const hasStaffInfo = Boolean(row.staff_position && row.department);
+  const hasStaffInfo = Boolean(staffPositionVal && deptVal);
   const hasBio = Boolean(String(row.bio || '').trim().length > 0);
   const hasAvatar = Boolean(row.avatar_url);
   const hasInterests = Array.isArray(row.interests) && row.interests.length > 0;
-  const hasDeptOrId = Boolean(row.department || row.student_id);
+  const hasDeptOrId = Boolean(deptVal || studentIdVal);
 
   let completionPct = 25; // Base: verified name + university email
   if (hasAcademic || hasStaffInfo) completionPct += 35;
@@ -72,8 +106,13 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
 
   const profileCompleted =
     Boolean(row.profile_completed) ||
+    Boolean(profileExt.profile_completed) ||
     hasAcademic ||
     hasStaffInfo ||
+    hasBio ||
+    hasInterests ||
+    hasAvatar ||
+    Boolean(row.program_id || deptVal || studentIdVal) ||
     role === 'super_admin' ||
     role === 'admin' ||
     role === 'verified_teacher';
@@ -94,10 +133,10 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
     program_name: row.program_name ? String(row.program_name) : null,
     semester_id: row.semester_id ? String(row.semester_id) : null,
     semester_name: row.semester_name ? String(row.semester_name) : null,
-    department: row.department ? String(row.department) : null,
-    student_id: row.student_id ? String(row.student_id) : null,
-    staff_position: row.staff_position ? String(row.staff_position) : null,
-    designation: row.designation ? String(row.designation) : null,
+    department: deptVal,
+    student_id: studentIdVal,
+    staff_position: staffPositionVal,
+    designation: designationVal,
     profile_completed: profileCompleted,
     profile_completion_pct: completionPct,
     staff_verification_status: staffVerificationStatus,
@@ -110,11 +149,10 @@ export async function getAuthUserFromDb(db: DbExecutor, userId: string): Promise
         events: true,
         announcements: true,
       },
-    privacy_settings:
-      (row.privacy_settings as AuthUser['privacy_settings']) || {
-        show_program: true,
-        allow_connection_requests: true,
-      },
+    privacy_settings: {
+      show_program: rawPrivacy.show_program !== false,
+      allow_connection_requests: rawPrivacy.allow_connection_requests !== false,
+    },
     account_status: (row.account_status as AuthUser['account_status']) || 'active',
     moderated_community_ids: modRows.map((m) => String(m.community_id)),
     created_at: new Date(String(row.created_at)).toISOString(),

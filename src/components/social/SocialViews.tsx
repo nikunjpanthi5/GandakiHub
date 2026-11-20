@@ -17,6 +17,7 @@ import {
 import { useApp } from '../../context/AppContext.tsx';
 import { api, formatRelativeDate, formatRoleLabel, resolveApiUrl } from '../../lib/api.ts';
 import type {
+  AuthUser,
   ConnectionRequestItem,
   ConnectionSummary,
   NotificationItem,
@@ -414,7 +415,7 @@ const STAFF_POSITIONS = [
 ];
 
 export function ProfileView({ username }: { username?: string }) {
-  const { user, structure, refreshUser, setAuthModalOpen, notify } = useApp();
+  const { user, structure, refreshUser, applyAuthSession, setAuthModalOpen, notify } = useApp();
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [posts, setPosts] = useState<Array<{ id: string; title: string; community_name: string; upvote_count: number; created_at: string }>>([]);
   const [resources, setResources] = useState<Array<{ id: string; title: string; status: string; subject_name: string; category_name: string; download_count: number }>>([]);
@@ -510,7 +511,7 @@ export function ProfileView({ username }: { username?: string }) {
     e.preventDefault();
     setSavingProfile(true);
     try {
-      await api.patch('/api/auth/profile', {
+      const res = await api.patch<{ user: AuthUser }>('/api/auth/profile', {
         display_name: displayName,
         bio,
         department: department.trim() || null,
@@ -519,13 +520,38 @@ export function ProfileView({ username }: { username?: string }) {
         semester_id: semesterId || null,
         interests: interestsStr.split(',').map((s) => s.trim()).filter(Boolean),
         privacy_settings: { show_program: showProgram, allow_connection_requests: allowConns },
+        profile_completed: true,
       });
-      await refreshUser();
+      if (res.user) {
+        applyAuthSession(res.user);
+      } else {
+        await refreshUser();
+      }
       await load();
       setEditing(false);
       notify('Profile updated.', 'success');
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Unable to save profile.', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function handleMarkCompleteWithoutOptional() {
+    setSavingProfile(true);
+    try {
+      const res = await api.patch<{ user: AuthUser }>('/api/auth/profile', {
+        profile_completed: true,
+      });
+      if (res.user) {
+        applyAuthSession(res.user);
+      } else {
+        await refreshUser();
+      }
+      await load();
+      notify('Profile marked as complete.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to update profile status.', 'error');
     } finally {
       setSavingProfile(false);
     }
@@ -621,9 +647,22 @@ export function ProfileView({ username }: { username?: string }) {
                 @{profile.username} · {formatRoleLabel(profile.role)}
                 {profile.university_email_verified ? ' · University Verified' : ''}
               </div>
-              {(profile.department || profile.designation || profile.staff_position) && (
+              {(
+                (isSelf ? user?.department : null) ||
+                profile.department ||
+                (isSelf ? user?.designation || user?.staff_position : null) ||
+                profile.designation ||
+                profile.staff_position
+              ) && (
                 <div className="text-xs text-slate-600 dark:text-slate-300">
-                  {[profile.designation || profile.staff_position, profile.department].filter(Boolean).join(' · ')}
+                  {[
+                    (isSelf ? user?.designation || user?.staff_position : null) ||
+                      profile.designation ||
+                      profile.staff_position,
+                    (isSelf ? user?.department : null) || profile.department,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </div>
               )}
               {profile.program_name && (
@@ -631,9 +670,9 @@ export function ProfileView({ username }: { username?: string }) {
                   {profile.program_name} {profile.semester_name ? `· ${profile.semester_name}` : ''}
                 </div>
               )}
-              {isSelf && user?.student_id && (
+              {isSelf && (user?.student_id || profile.student_id) && (
                 <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                  Student ID: {user.student_id}
+                  GU ID: {user?.student_id || profile.student_id}
                 </div>
               )}
               <div className="text-[11px] font-mono text-slate-400">
@@ -662,31 +701,46 @@ export function ProfileView({ username }: { username?: string }) {
         {isSelf && user && (
           <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="font-medium text-slate-700 dark:text-slate-300">
+              <span className="font-medium text-slate-700 dark:text-slate-300 inline-flex items-center gap-1.5">
+                {user.profile_completed && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
                 {user.profile_completed ? 'Profile Complete' : 'Profile Completion'}
               </span>
               <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-white">
-                {user.profile_completion_pct}%
+                {user.profile_completed ? 'Complete' : `${user.profile_completion_pct}%`}
               </span>
             </div>
             <div className="h-1.5 w-full rounded-sm bg-slate-200 dark:bg-slate-800 overflow-hidden">
               <div
                 className={`h-full transition-all ${user.profile_completed ? 'bg-emerald-600' : 'bg-blue-600'}`}
-                style={{ width: `${Math.min(100, Math.max(0, user.profile_completion_pct))}%` }}
+                style={{ width: `${user.profile_completed ? 100 : Math.min(100, Math.max(0, user.profile_completion_pct))}%` }}
               />
             </div>
-            {!user.profile_completed && !editing && (
-              <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                <span>Add your department, program, semester, bio, or interests when convenient.</span>
-                <button
-                  type="button"
-                  onClick={() => setEditing(true)}
-                  className="font-medium text-blue-700 dark:text-blue-400 hover:underline shrink-0"
-                >
-                  Complete now
-                </button>
+            {user.profile_completed ? (
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                Your profile is complete. Department, GU ID, program, semester, bio, and photo remain optional.
               </div>
-            )}
+            ) : !editing ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                <span>Add optional details like bio, program, department, or GU ID, or confirm your profile now.</span>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    disabled={savingProfile}
+                    onClick={() => void handleMarkCompleteWithoutOptional()}
+                    className="font-medium text-slate-700 dark:text-slate-300 hover:underline disabled:opacity-50"
+                  >
+                    Mark complete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    className="font-medium text-blue-700 dark:text-blue-400 hover:underline"
+                  >
+                    Edit profile
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -756,7 +810,7 @@ export function ProfileView({ username }: { username?: string }) {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-medium mb-1">Student ID (Private, Optional)</label>
+                <label className="block text-xs font-medium mb-1">GU ID / Student ID (Private, Optional)</label>
                 <input
                   type="text"
                   value={studentId}
@@ -766,7 +820,7 @@ export function ProfileView({ username }: { username?: string }) {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium mb-1">Interests (comma separated)</label>
+                <label className="block text-xs font-medium mb-1">Interests (Optional, comma separated)</label>
                 <input
                   type="text"
                   value={interestsStr}
@@ -777,7 +831,7 @@ export function ProfileView({ username }: { username?: string }) {
               </div>
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">Biography</label>
+              <label className="block text-xs font-medium mb-1">Biography (Optional)</label>
               <textarea
                 rows={2}
                 value={bio}
@@ -789,13 +843,16 @@ export function ProfileView({ username }: { username?: string }) {
             <div className="flex flex-wrap gap-4 text-xs">
               <label className="inline-flex items-center gap-2">
                 <input type="checkbox" checked={showProgram} onChange={(e) => setShowProgram(e.target.checked)} />
-                Show program & semester publicly
+                Show program &amp; semester publicly
               </label>
               <label className="inline-flex items-center gap-2">
                 <input type="checkbox" checked={allowConns} onChange={(e) => setAllowConns(e.target.checked)} />
                 Accept connection requests
               </label>
             </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Only Display Name is required. Department, GU ID, program, semester, bio, and interests are all optional.
+            </p>
             <button
               type="submit"
               disabled={savingProfile}

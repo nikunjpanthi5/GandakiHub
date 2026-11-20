@@ -478,7 +478,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Add your department, academic program, or submit university staff verification from your profile anytime.
+                  Review your profile or add optional details like your bio, program, department, or GU ID anytime.
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
